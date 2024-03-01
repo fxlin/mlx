@@ -10,6 +10,7 @@ namespace mlx::core {
 
 namespace {
 
+// xzl: x-activation? w:weights?(quant?)    seems only weights are quantized...?
 void _qmm_t_4_64(
     float* result,
     const float* x,
@@ -49,6 +50,7 @@ void _qmm_t_4_64(
               wii >>= bits;
             }
           }
+          // xzl: dequant? 
           simd_float16 wf = simd_float(wi);
           wf *= scale;
           wf += bias;
@@ -90,6 +92,7 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
     int K = x.shape(-1);
     int M = x.size() / K;
     int N = w.shape(1);
+    // xzl: it's clear-- x(inputs) is float, w(weights) is int (quant)
     _qmm_t_4_64(
         out.data<float>(),
         x.data<float>(),
