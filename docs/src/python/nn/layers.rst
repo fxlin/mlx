@@ -9,29 +9,35 @@ Layers
    :toctree: _autosummary
    :template: nn-module-template.rst
 
-   Sequential
-   ReLU
-   PReLU
-   GELU
-   SiLU
-   Step
-   SELU
-   Mish
-   Embedding
-   Linear
-   QuantizedLinear
+   ALiBi
+   AvgPool1d
+   AvgPool2d
+   BatchNorm
    Conv1d
    Conv2d
-   BatchNorm
-   LayerNorm
-   RMSNorm
-   GroupNorm
-   InstanceNorm
    Dropout
    Dropout2d
    Dropout3d
-   Transformer
+   Embedding
+   GELU
+   GroupNorm
+   InstanceNorm
+   LayerNorm
+   Linear
+   MaxPool1d
+   MaxPool2d
+   Mish
    MultiHeadAttention
-   ALiBi
+   PReLU
+   QuantizedLinear
+   RMSNorm
+   ReLU
    RoPE
+   SELU
+   Sequential
+   SiLU
    SinusoidalPositionalEncoding
+   Softshrink
+   Step
+   Transformer
+   Upsample

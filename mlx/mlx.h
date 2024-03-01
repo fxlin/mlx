@@ -4,8 +4,11 @@
 
 #include "mlx/array.h"
 #include "mlx/backend/metal/metal.h"
+#include "mlx/compile.h"
 #include "mlx/device.h"
+#include "mlx/fast.h"
 #include "mlx/fft.h"
+#include "mlx/io.h"
 #include "mlx/linalg.h"
 #include "mlx/ops.h"
 #include "mlx/random.h"

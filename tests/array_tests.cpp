@@ -222,6 +222,8 @@ TEST_CASE("test array types") {
 
   // complex64
   {
+    CHECK_EQ(sizeof(complex64_t), sizeof(std::complex<float>));
+
     complex64_t v = {1.0f, 1.0f};
     array x(v);
     CHECK_EQ(x.dtype(), complex64);
@@ -588,4 +590,22 @@ TEST_CASE("test array shared buffer") {
   array b = array(buf_b, shape, float32, deleter);
 
   eval(a + b);
+}
+
+TEST_CASE("test make empty array") {
+  auto a = array({});
+  CHECK_EQ(a.size(), 0);
+  CHECK_EQ(a.dtype(), float32);
+
+  a = array({}, int32);
+  CHECK_EQ(a.size(), 0);
+  CHECK_EQ(a.dtype(), int32);
+
+  a = array({}, float32);
+  CHECK_EQ(a.size(), 0);
+  CHECK_EQ(a.dtype(), float32);
+
+  a = array({}, bool_);
+  CHECK_EQ(a.size(), 0);
+  CHECK_EQ(a.dtype(), bool_);
 }

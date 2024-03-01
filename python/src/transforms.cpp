@@ -1,6 +1,4 @@
-// Copyright © 2023 Apple Inc.
-
-#include <pybind11/functional.h>
+// Copyright © 2023-2024 Apple Inc.
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
@@ -9,9 +7,11 @@
 #include <sstream>
 
 #include "mlx/array.h"
+#include "mlx/compile.h"
 #include "mlx/graph_utils.h"
 #include "mlx/transforms.h"
 #include "mlx/transforms_impl.h"
+#include "python/src/trees.h"
 
 namespace py = pybind11;
 using namespace py::literals;
@@ -29,138 +29,6 @@ std::vector<T> to_vector(const std::variant<T, std::vector<T>>& v) {
     vals = std::get<std::vector<T>>(v);
   }
   return vals;
-}
-
-void tree_visit(py::object tree, std::function<void(py::handle)> visitor) {
-  std::function<void(py::handle)> recurse;
-  recurse = [&](py::handle subtree) {
-    if (py::isinstance<py::list>(subtree) ||
-        py::isinstance<py::tuple>(subtree)) {
-      for (auto item : subtree) {
-        recurse(item);
-      }
-    } else if (py::isinstance<py::dict>(subtree)) {
-      for (auto item : py::cast<py::dict>(subtree)) {
-        recurse(item.second);
-      }
-    } else {
-      visitor(subtree);
-    }
-  };
-
-  recurse(tree);
-}
-
-template <typename T, typename U, typename V>
-void validate_subtrees(const std::vector<py::object>& subtrees) {
-  int len = py::cast<T>(subtrees[0]).size();
-  for (auto& subtree : subtrees) {
-    if ((py::isinstance<T>(subtree) && py::cast<T>(subtree).size() != len) ||
-        py::isinstance<U>(subtree) || py::isinstance<V>(subtree)) {
-      throw std::invalid_argument(
-          "[tree_map] Additional input tree is not a valid prefix of the first tree.");
-    }
-  }
-}
-
-py::object tree_map(
-    const std::vector<py::object>& trees,
-    std::function<py::object(const std::vector<py::object>&)> transform) {
-  std::function<py::object(const std::vector<py::object>&)> recurse;
-
-  recurse = [&](const std::vector<py::object>& subtrees) {
-    if (py::isinstance<py::list>(subtrees[0])) {
-      py::list l;
-      std::vector<py::object> items(subtrees.size());
-      validate_subtrees<py::list, py::tuple, py::dict>(subtrees);
-      for (int i = 0; i < py::cast<py::list>(subtrees[0]).size(); ++i) {
-        for (int j = 0; j < subtrees.size(); ++j) {
-          if (py::isinstance<py::list>(subtrees[j])) {
-            items[j] = py::cast<py::list>(subtrees[j])[i];
-          } else {
-            items[j] = subtrees[j];
-          }
-        }
-        l.append(recurse(items));
-      }
-      return py::cast<py::object>(l);
-    } else if (py::isinstance<py::tuple>(subtrees[0])) {
-      //  Check the rest of the subtrees
-      std::vector<py::object> items(subtrees.size());
-      int len = py::cast<py::tuple>(subtrees[0]).size();
-      py::tuple l(len);
-      validate_subtrees<py::tuple, py::list, py::dict>(subtrees);
-      for (int i = 0; i < len; ++i) {
-        for (int j = 0; j < subtrees.size(); ++j) {
-          if (py::isinstance<py::tuple>(subtrees[j])) {
-            items[j] = py::cast<py::tuple>(subtrees[j])[i];
-          } else {
-            items[j] = subtrees[j];
-          }
-        }
-        l[i] = recurse(items);
-      }
-      return py::cast<py::object>(l);
-    } else if (py::isinstance<py::dict>(subtrees[0])) {
-      std::vector<py::object> items(subtrees.size());
-      validate_subtrees<py::dict, py::list, py::tuple>(subtrees);
-      py::dict d;
-      for (auto item : py::cast<py::dict>(subtrees[0])) {
-        for (int j = 0; j < subtrees.size(); ++j) {
-          if (py::isinstance<py::dict>(subtrees[j])) {
-            auto subdict = py::cast<py::dict>(subtrees[j]);
-            if (!subdict.contains(item.first)) {
-              throw std::invalid_argument(
-                  "[tree_map] Tree is not a valid prefix tree of the first tree.");
-            }
-            items[j] = subdict[item.first];
-          } else {
-            items[j] = subtrees[j];
-          }
-        }
-        d[item.first] = recurse(items);
-      }
-      return py::cast<py::object>(d);
-    } else {
-      return transform(subtrees);
-    }
-  };
-  return recurse(trees);
-}
-
-py::object tree_map(
-    py::object tree,
-    std::function<py::object(py::handle)> transform) {
-  return tree_map({tree}, [&](std::vector<py::object> inputs) {
-    return transform(inputs[0]);
-  });
-}
-
-std::vector<array> tree_flatten(py::object tree, bool strict = true) {
-  std::vector<array> flat_tree;
-
-  tree_visit(tree, [&](py::handle obj) {
-    if (py::isinstance<array>(obj)) {
-      flat_tree.push_back(py::cast<array>(obj));
-    } else if (strict) {
-      throw std::invalid_argument("Argument is not an array");
-    }
-  });
-
-  return flat_tree;
-}
-
-py::object tree_unflatten(
-    py::object tree,
-    const std::vector<array>& values,
-    int index = 0) {
-  return tree_map(tree, [&](py::handle obj) {
-    if (py::isinstance<array>(obj)) {
-      return py::cast(values[index++]);
-    } else {
-      return py::cast<py::object>(obj);
-    }
-  });
 }
 
 auto validate_argnums_argnames(
@@ -437,25 +305,255 @@ auto py_vmap(
   };
 }
 
+std::unordered_map<size_t, py::object>& tree_cache() {
+  // This map is used to Cache the tree structure of the outputs
+  static std::unordered_map<size_t, py::object> tree_cache_;
+  return tree_cache_;
+}
+
+struct PyCompiledFun {
+  py::function fun;
+  size_t fun_id;
+  py::object captured_inputs;
+  py::object captured_outputs;
+  bool shapeless;
+  size_t num_outputs{0};
+
+  PyCompiledFun(
+      const py::function& fun,
+      py::object inputs,
+      py::object outputs,
+      bool shapeless)
+      : fun(fun),
+        fun_id(reinterpret_cast<size_t>(fun.ptr())),
+        captured_inputs(inputs),
+        captured_outputs(outputs),
+        shapeless(shapeless) {}
+
+  PyCompiledFun(const PyCompiledFun&) = delete;
+  PyCompiledFun& operator=(const PyCompiledFun&) = delete;
+  PyCompiledFun& operator=(PyCompiledFun&& other) = delete;
+  PyCompiledFun(PyCompiledFun&& other)
+      : fun(std::move(other.fun)), fun_id(reinterpret_cast<size_t>(fun.ptr())) {
+    other.fun_id = 0;
+    captured_inputs = std::move(other.captured_inputs);
+    captured_outputs = std::move(other.captured_outputs);
+    shapeless = other.shapeless;
+    num_outputs = other.num_outputs;
+  };
+
+  py::object operator()(const py::args& args, const py::kwargs& kwargs) {
+    // Flat array inputs
+    std::vector<array> inputs;
+
+    // Compilation constants which includes the tree structure of the arguments
+    std::vector<uint64_t> constants;
+
+    // Reserve some large primes to signify the presence of an array, a list or
+    // a dict in order to encode the structure of the pytree. We choose primes
+    // to reduce slightly the chances of these numbers occuring by a
+    // multiplication as values in the constants list.
+    constexpr uint64_t array_identifier = 18446744073709551557UL;
+    constexpr uint64_t list_identifier = 18446744073709551533UL;
+    constexpr uint64_t dict_identifier = 18446744073709551521UL;
+
+    // Flatten the tree with hashed constants and structure
+    std::function<void(py::handle)> recurse;
+    recurse = [&](py::handle obj) {
+      if (py::isinstance<py::list>(obj)) {
+        auto l = py::cast<py::list>(obj);
+        constants.push_back(list_identifier);
+        for (int i = 0; i < l.size(); ++i) {
+          recurse(l[i]);
+        }
+      } else if (py::isinstance<py::tuple>(obj)) {
+        auto l = py::cast<py::tuple>(obj);
+        constants.push_back(list_identifier);
+        for (auto item : obj) {
+          recurse(item);
+        }
+      } else if (py::isinstance<py::dict>(obj)) {
+        auto d = py::cast<py::dict>(obj);
+        constants.push_back(dict_identifier);
+        for (auto item : d) {
+          auto r = py::hash(item.first);
+          constants.push_back(*reinterpret_cast<uint64_t*>(&r));
+          recurse(item.second);
+        }
+      } else if (py::isinstance<array>(obj)) {
+        inputs.push_back(py::cast<array>(obj));
+        constants.push_back(array_identifier);
+      } else if (py::isinstance<py::str>(obj)) {
+        auto r = py::hash(obj);
+        constants.push_back(*reinterpret_cast<uint64_t*>(&r));
+      } else if (py::isinstance<py::int_>(obj)) {
+        auto r = obj.cast<int64_t>();
+        constants.push_back(*reinterpret_cast<uint64_t*>(&r));
+      } else if (py::isinstance<py::float_>(obj)) {
+        auto r = obj.cast<double>();
+        constants.push_back(*reinterpret_cast<uint64_t*>(&r));
+      } else {
+        std::ostringstream msg;
+        msg << "[compile] Function arguments must be trees of arrays "
+            << "or constants (floats, ints, or strings), but received "
+            << "type " << obj.get_type() << ".";
+        throw std::invalid_argument(msg.str());
+      }
+    };
+
+    recurse(args);
+    int num_args = inputs.size();
+    recurse(kwargs);
+
+    auto compile_fun = [this, &args, &kwargs, num_args](
+                           const std::vector<array>& a) {
+      // Put tracers into captured inputs
+      std::vector<array> flat_in_captures;
+      std::vector<array> trace_captures;
+      if (!py::isinstance<py::none>(captured_inputs)) {
+        flat_in_captures = tree_flatten(captured_inputs, false);
+        trace_captures.insert(
+            trace_captures.end(), a.end() - flat_in_captures.size(), a.end());
+        tree_fill(captured_inputs, trace_captures);
+      }
+
+      auto tree_outputs =
+          fun(*tree_unflatten(args, a), **tree_unflatten(kwargs, a, num_args));
+      auto [outputs, py_outputs] =
+          tree_flatten_with_structure(std::move(tree_outputs), false);
+
+      tree_cache().insert({fun_id, py_outputs});
+
+      num_outputs = outputs.size();
+      if (!py::isinstance<py::none>(captured_outputs)) {
+        auto flat_out_captures = tree_flatten(captured_outputs, false);
+        outputs.insert(
+            outputs.end(),
+            std::make_move_iterator(flat_out_captures.begin()),
+            std::make_move_iterator(flat_out_captures.end()));
+      }
+
+      // Replace tracers with originals in captured inputs
+      if (!py::isinstance<py::none>(captured_inputs)) {
+        tree_replace(captured_inputs, trace_captures, flat_in_captures);
+      }
+      return outputs;
+    };
+
+    if (!py::isinstance<py::none>(captured_inputs)) {
+      auto flat_in_captures = tree_flatten(captured_inputs, false);
+      inputs.insert(
+          inputs.end(),
+          std::make_move_iterator(flat_in_captures.begin()),
+          std::make_move_iterator(flat_in_captures.end()));
+    }
+
+    // Compile and call
+    auto outputs =
+        detail::compile(compile_fun, fun_id, shapeless, constants)(inputs);
+    if (!py::isinstance<py::none>(captured_outputs)) {
+      std::vector<array> captures(
+          std::make_move_iterator(outputs.begin() + num_outputs),
+          std::make_move_iterator(outputs.end()));
+      tree_fill(captured_outputs, captures);
+    }
+
+    // Put the outputs back in the container
+    py::object py_outputs = tree_cache().at(fun_id);
+    return tree_unflatten_from_structure(py_outputs, outputs);
+  };
+
+  ~PyCompiledFun() {
+    py::gil_scoped_acquire gil;
+
+    tree_cache().erase(fun_id);
+    detail::compile_erase(fun_id);
+    fun.release().dec_ref();
+    captured_inputs.release().dec_ref();
+    captured_outputs.release().dec_ref();
+  }
+};
+
+class PyCheckpointedFun {
+ public:
+  PyCheckpointedFun(py::function fun) : fun_(std::move(fun)) {}
+
+  ~PyCheckpointedFun() {
+    py::gil_scoped_acquire gil;
+
+    fun_.release().dec_ref();
+  }
+
+  struct InnerFunction {
+    py::object fun_;
+    py::object args_structure_;
+    std::weak_ptr<py::object> output_structure_;
+
+    InnerFunction(
+        py::object fun,
+        py::object args_structure,
+        std::weak_ptr<py::object> output_structure)
+        : fun_(std::move(fun)),
+          args_structure_(std::move(args_structure)),
+          output_structure_(output_structure) {}
+    ~InnerFunction() {
+      py::gil_scoped_acquire gil;
+
+      fun_.release().dec_ref();
+      args_structure_.release().dec_ref();
+    }
+
+    std::vector<array> operator()(const std::vector<array>& inputs) {
+      auto args = py::cast<py::tuple>(
+          tree_unflatten_from_structure(args_structure_, inputs));
+      auto [outputs, output_structure] =
+          tree_flatten_with_structure(fun_(*args[0], **args[1]), false);
+      if (auto s = output_structure_.lock()) {
+        *s = output_structure;
+      }
+      return outputs;
+    }
+  };
+
+  py::object operator()(const py::args& args, const py::kwargs& kwargs) {
+    auto output_structure = std::make_shared<py::object>();
+    auto full_args = py::make_tuple(args, kwargs);
+    auto [inputs, args_structure] =
+        tree_flatten_with_structure(full_args, false);
+
+    auto outputs = checkpoint(
+        InnerFunction(fun_, args_structure, output_structure))(inputs);
+
+    return tree_unflatten_from_structure(*output_structure, outputs);
+  }
+
+ private:
+  py::function fun_;
+};
+
 void init_transforms(py::module_& m) {
+  py::options options;
+  options.disable_function_signatures();
+
   m.def(
       "eval",
-      [](const py::args& args, bool retain_graph) {
-        std::vector<array> arrays = tree_flatten(args);
-        eval(arrays, retain_graph);
+      [](const py::args& args) {
+        std::vector<array> arrays = tree_flatten(args, false);
+        {
+          py::gil_scoped_release nogil;
+          eval(arrays);
+        }
       },
-      "retain_graph"_a = false,
       R"pbdoc(
+        eval(*args) -> None
+
         Evaluate an :class:`array` or tree of :class:`array`.
 
         Args:
             *args (arrays or trees of arrays): Each argument can be a single array
               or a tree of arrays. If a tree is given the nodes can be a Python
-              :class:`list`, :class:`tuple` or :class:`dict` but the leafs must all be
-              an :class:`array`.
-            retain_graph (bool): Indicate that the graph structure should be
-              preserved. This option is intended to enable function transforms
-              which contain control flow based on the value of an array.
+              :class:`list`, :class:`tuple` or :class:`dict`. Leaves which are not
+              arrays are ignored.
       )pbdoc");
   m.def(
       "jvp",
@@ -480,6 +578,9 @@ void init_transforms(py::module_& m) {
       "primals"_a,
       "tangents"_a,
       R"pbdoc(
+        jvp(fun: function, primals: List[array], tangents: List[array]) -> Tuple[List[array], List[array]]
+
+
         Compute the Jacobian-vector product.
 
         This computes the product of the Jacobian of a function ``fun`` evaluated
@@ -521,6 +622,8 @@ void init_transforms(py::module_& m) {
       "primals"_a,
       "cotangents"_a,
       R"pbdoc(
+        vjp(fun: function, primals: List[array], cotangents: List[array]) -> Tuple[List[array], List[array]]
+
         Compute the vector-Jacobian product.
 
         Computes the product of the ``cotangents`` with the Jacobian of a
@@ -553,6 +656,8 @@ void init_transforms(py::module_& m) {
       "argnums"_a = std::nullopt,
       "argnames"_a = std::vector<std::string>{},
       R"pbdoc(
+        value_and_grad(fun: function, argnums: Optional[Union[int, List[int]]] = None, argnames: Union[str, List[str]] = []) -> function
+
         Returns a function which computes the value and gradient of ``fun``.
 
         The function passed to :func:`value_and_grad` should return either
@@ -619,6 +724,8 @@ void init_transforms(py::module_& m) {
       "argnums"_a = std::nullopt,
       "argnames"_a = std::vector<std::string>{},
       R"pbdoc(
+        grad(fun: function, argnums: Optional[Union[int, List[int]]] = None, argnames: Union[str, List[str]] = []) -> function
+
         Returns a function which computes the gradient of ``fun``.
 
         Args:
@@ -649,6 +756,8 @@ void init_transforms(py::module_& m) {
       "in_axes"_a = 0,
       "out_axes"_a = 0,
       R"pbdoc(
+        vmap(fun: function, in_axes: object = 0, out_axes: object = 0) -> function
+
         Returns a vectorized version of ``fun``.
 
         Args:
@@ -668,43 +777,6 @@ void init_transforms(py::module_& m) {
             function: The vectorized function.
       )pbdoc");
   m.def(
-      "simplify",
-      [](const py::args& args) {
-        std::vector<array> arrays = tree_flatten(args);
-        simplify(arrays);
-      },
-      R"pbdoc(
-        Simplify the graph that computes the arrays.
-
-        Run a few fast graph simplification operations to reuse computation and
-        reduce memory consumption. This function is meant to be run every time
-        so its overhead should be small, approximately 1ms for a graph with a
-        few thousand nodes.
-
-        .. code-block:: python
-
-          import mlx.core as mx
-
-          def foo(x):
-            y = x @ x
-            z = x @ x
-            return y + z
-
-          x = mx.ones((10, 10))
-          y = foo(x)
-          z = foo(x)
-
-          # Computes the matmul twice
-          mx.eval(y)
-
-          # Computes the matmul once
-          mx.simplify(z)
-          mx.eval(z)
-
-        Args:
-          args: Any number of arrays and/or trees of arrays to be simplified.
-      )pbdoc");
-  m.def(
       "export_to_dot",
       [](py::object file, const py::args& args) {
         std::vector<array> arrays = tree_flatten(args);
@@ -722,4 +794,103 @@ void init_transforms(py::module_& m) {
         }
       },
       "file"_a);
+  m.def(
+      "compile",
+      [](const py::function& fun,
+         const py::object& inputs,
+         const py::object& outputs,
+         bool shapeless) {
+        py::options options;
+        options.disable_function_signatures();
+
+        std::ostringstream doc;
+        auto name = fun.attr("__name__").cast<std::string>();
+        doc << name;
+
+        // Try to get the signature
+        auto inspect = py::module::import("inspect");
+        if (!inspect.attr("isbuiltin")(fun).cast<bool>()) {
+          doc << inspect.attr("signature")(fun)
+                     .attr("__str__")()
+                     .cast<std::string>();
+        }
+
+        // Try to get the doc string
+        if (auto d = fun.attr("__doc__"); py::isinstance<py::str>(d)) {
+          doc << "\n\n";
+          auto dstr = d.cast<std::string>();
+          // Add spaces to match first line indentation with remainder of
+          // docstring
+          int i = 0;
+          for (int i = dstr.size() - 1; i >= 0 && dstr[i] == ' '; i--) {
+            doc << ' ';
+          }
+          doc << dstr;
+        }
+        auto doc_str = doc.str();
+        return py::cpp_function(
+            PyCompiledFun{fun, inputs, outputs, shapeless},
+            py::name(name.c_str()),
+            py::doc(doc_str.c_str()));
+      },
+      "fun"_a,
+      "inputs"_a = std::nullopt,
+      "outputs"_a = std::nullopt,
+      "shapeless"_a = false,
+      R"pbdoc(
+        compile(fun: function) -> function
+
+        Returns a compiled function which produces the same output as ``fun``.
+
+        Args:
+            fun (function): A function which takes a variable number of
+              :class:`array` or trees of :class:`array` and returns
+              a variable number of :class:`array` or trees of :class:`array`.
+            inputs (list or dict, optional): These inputs will be captured during
+              the function compilation along with the inputs to ``fun``. The ``inputs``
+              can be a :obj:`list` or a :obj:`dict` containing arbitrarily nested
+              lists, dictionaries, or arrays. Leaf nodes that are not
+              :obj:`array` are ignored. Default: ``None``
+            outputs (list or dict, optional): These outputs will be captured and
+              updated in a compiled function. The ``outputs`` can be a
+              :obj:`list` or a :obj:`dict` containing arbitrarily nested lists,
+              dictionaries, or arrays. Leaf nodes that are not :obj:`array` are ignored.
+              Default: ``None``
+            shapeless (bool, optional): A function compiled with the ``shapeless``
+              option enabled will not be recompiled when the input shape changes. Not all
+              functions can be compiled with ``shapeless`` enabled. Attempting to compile
+              such functions with shapeless enabled will throw. Note, changing the number
+              of dimensions or type of any input will result in a recompilation even with
+              ``shapeless`` set to ``True``. Default: ``False``
+
+        Returns:
+            function: A compiled function which has the same input arguments
+            as ``fun`` and returns the the same output(s).
+      )pbdoc");
+  m.def(
+      "disable_compile",
+      &disable_compile,
+      R"pbdoc(
+        disable_compile() -> None
+
+        Globally disable compilation. Setting the environment variable
+        ``MLX_DISABLE_COMPILE`` can also be used to disable compilation.
+      )pbdoc");
+  m.def(
+      "enable_compile",
+      &enable_compile,
+      R"pbdoc(
+        enable_compile() -> None
+
+        Globally enable compilation. This will override the environment
+        variable ``MLX_DISABLE_COMPILE`` if set.
+      )pbdoc");
+  m.def(
+      "checkpoint",
+      [](py::function fun) { return py::cpp_function(PyCheckpointedFun{fun}); },
+      "fun"_a);
+
+  // Register static Python object cleanup before the interpreter exits
+  auto atexit = py::module_::import("atexit");
+  atexit.attr("register")(py::cpp_function([]() { tree_cache().clear(); }));
 }

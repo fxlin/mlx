@@ -7,6 +7,42 @@ import mlx.core as mx
 from mlx.utils import tree_flatten, tree_unflatten
 
 
+def _unwrap(model, value_key, value, filter_fn, map_fn, is_leaf_fn):
+    if is_leaf_fn(model, value_key, value):
+        return map_fn(value)
+
+    elif isinstance(value, Module):
+        return {
+            k: _unwrap(value, k, v, filter_fn, map_fn, is_leaf_fn)
+            for k, v in value.items()
+            if filter_fn(value, k, v)
+        }
+
+    elif isinstance(value, dict):
+        nd = {}
+        for k, v in v.items():
+            tk = f"{value_key}.{k}"
+            nd[k] = (
+                _unwrap(model, tk, v, filter_fn, map_fn, is_leaf_fn)
+                if filter_fn(model, tk, v)
+                else {}
+            )
+        return nd
+
+    elif isinstance(value, list):
+        nl = []
+        for i, vi in enumerate(value):
+            tk = f"{value_key}.{i}"
+            nl.append(
+                _unwrap(model, tk, vi, filter_fn, map_fn, is_leaf_fn)
+                if filter_fn(model, tk, vi)
+                else {}
+            )
+        return nl
+
+    raise RuntimeError("Unexpected leaf found while traversing the module")
+
+
 class Module(dict):
     """Base class for building neural networks with MLX.
 
@@ -54,6 +90,8 @@ class Module(dict):
         mx.eval(model.parameters())
     """
 
+    __call__: Callable
+
     def __init__(self):
         """Should be called by the subclasses of ``Module``."""
         self._no_grad = set()
@@ -63,6 +101,19 @@ class Module(dict):
     def training(self):
         """Boolean indicating if the model is in training mode."""
         return self._training
+
+    @property
+    def state(self):
+        """The module's state dictionary
+
+        The module's state dictionary contains any attribute set on the
+        module including parameters in :meth:`Module.parameters`
+
+        Unlike :meth:`Module.parameters`, the :attr:`Module.state` property is
+        a reference to the module's state. Updates to it will be reflected in
+        the original module.
+        """
+        return self
 
     def _extra_repr(self):
         return ""
@@ -83,10 +134,13 @@ class Module(dict):
         if key in self:
             return self[key]
         else:
-            raise AttributeError(f"{type(self)!r} has no attribute {key!r}")
+            super(Module, self).__getattr__(key, val)
 
     def __setattr__(self, key: str, val: Any):
-        self[key] = val
+        if isinstance(val, (mx.array, dict, list, tuple)):
+            self[key] = val
+        else:
+            super(Module, self).__setattr__(key, val)
 
     def load_weights(
         self,
@@ -94,11 +148,11 @@ class Module(dict):
         strict: bool = True,
     ):
         """
-        Update the model's weights from a ``.npz`` or a list.
+        Update the model's weights from a ``.npz``, a ``.safetensors`` file, or a list.
 
         Args:
             file_or_weights (str or list(tuple(str, mx.array))): The path to
-                the weights ``.npz`` file or a list of pairs of parameter names
+                the weights ``.npz`` file (``.npz`` or ``.safetensors``) or a list of pairs of parameter names
                 and arrays.
             strict (bool, optional): If ``True`` then checks that the provided
               weights exactly match the parameters of the model. Otherwise,
@@ -115,6 +169,9 @@ class Module(dict):
 
                 # Load from file
                 model.load_weights("weights.npz")
+
+                # Load from .safetensors file
+                model.load_weights("weights.safetensors")
 
                 # Load from list
                 weights = [
@@ -164,9 +221,20 @@ class Module(dict):
 
     def save_weights(self, file: str):
         """
-        Save the model's weights to a ``.npz`` file.
+        Save the model's weights to a file. The saving method is determined by the file extension:
+        - ``.npz`` will use :func:`mx.savez`
+        - ``.safetensors`` will use :func:`mx.save_safetensors`
         """
-        mx.savez(file, **dict(tree_flatten(self.parameters())))
+        params_dict = dict(tree_flatten(self.parameters()))
+
+        if file.endswith(".npz"):
+            mx.savez(file, **params_dict)
+        elif file.endswith(".safetensors"):
+            mx.save_safetensors(file, params_dict)
+        else:
+            raise ValueError(
+                "Unsupported file extension. Use '.npz' or '.safetensors'."
+            )
 
     @staticmethod
     def is_module(value):
@@ -216,31 +284,11 @@ class Module(dict):
         is_leaf_fn = is_leaf_fn or (
             lambda m, k, v: not isinstance(v, (Module, dict, list))
         )
-
-        def unwrap(vk, v):
-            if is_leaf_fn(self, vk, v):
-                return map_fn(v)
-
-            if isinstance(v, Module):
-                return v.filter_and_map(filter_fn, map_fn, is_leaf_fn)
-
-            if isinstance(v, dict):
-                nd = {}
-                for k, v in v.items():
-                    tk = f"{vk}.{k}"
-                    nd[k] = unwrap(tk, v) if filter_fn(self, tk, v) else {}
-                return nd
-
-            if isinstance(v, list):
-                nl = []
-                for i, vi in enumerate(v):
-                    tk = f"{vk}.{i}"
-                    nl.append(unwrap(tk, vi) if filter_fn(self, tk, vi) else {})
-                return nl
-
-            raise RuntimeError("Unexpected leaf found while traversing the module")
-
-        return {k: unwrap(k, v) for k, v in self.items() if filter_fn(self, k, v)}
+        return {
+            k: _unwrap(self, k, v, filter_fn, map_fn, is_leaf_fn)
+            for k, v in self.items()
+            if filter_fn(self, k, v)
+        }
 
     def parameters(self):
         """Recursively return all the :class:`mlx.core.array` members of this Module
@@ -296,7 +344,7 @@ class Module(dict):
                         elif isinstance(current_value, (dict, list)):
                             apply(current_value, new_value)
             elif isinstance(parameters, list):
-                for i in range(len(dst)):
+                for i in range(len(parameters)):
                     current_value = dst[i]
                     new_value = parameters[i]
                     if isinstance(current_value, mx.array):

@@ -160,30 +160,41 @@ class PyFileReader : public io::Reader {
   py::object tell_func_;
 };
 
-std::unordered_map<std::string, array> mlx_load_safetensor_helper(
-    py::object file,
-    StreamOrDevice s) {
+std::pair<
+    std::unordered_map<std::string, array>,
+    std::unordered_map<std::string, std::string>>
+mlx_load_safetensor_helper(py::object file, StreamOrDevice s) {
   if (py::isinstance<py::str>(file)) { // Assume .safetensors file path string
     return load_safetensors(py::cast<std::string>(file), s);
   } else if (is_istream_object(file)) {
     // If we don't own the stream and it was passed to us, eval immediately
-    auto arr = load_safetensors(std::make_shared<PyFileReader>(file), s);
+    auto res = load_safetensors(std::make_shared<PyFileReader>(file), s);
     {
       py::gil_scoped_release gil;
-      for (auto& [key, arr] : arr) {
+      for (auto& [key, arr] : std::get<0>(res)) {
         arr.eval();
       }
     }
-    return arr;
+    return res;
   }
 
   throw std::invalid_argument(
       "[load_safetensors] Input must be a file-like object, or string");
 }
 
+GGUFLoad mlx_load_gguf_helper(py::object file, StreamOrDevice s) {
+  if (py::isinstance<py::str>(file)) { // Assume .gguf file path string
+    return load_gguf(py::cast<std::string>(file), s);
+  }
+
+  throw std::invalid_argument("[load_gguf] Input must be a string");
+}
+
 std::unordered_map<std::string, array> mlx_load_npz_helper(
     py::object file,
     StreamOrDevice s) {
+  bool own_file = py::isinstance<py::str>(file);
+
   py::module_ zipfile = py::module_::import("zipfile");
   if (!is_zip_file(zipfile, file)) {
     throw std::invalid_argument(
@@ -212,9 +223,11 @@ std::unordered_map<std::string, array> mlx_load_npz_helper(
   }
 
   // If we don't own the stream and it was passed to us, eval immediately
-  for (auto& [key, arr] : array_dict) {
+  if (!own_file) {
     py::gil_scoped_release gil;
-    arr.eval();
+    for (auto& [key, arr] : array_dict) {
+      arr.eval();
+    }
   }
 
   return array_dict;
@@ -236,9 +249,10 @@ array mlx_load_npy_helper(py::object file, StreamOrDevice s) {
       "[load_npy] Input must be a file-like object, or string");
 }
 
-DictOrArray mlx_load_helper(
+LoadOutputTypes mlx_load_helper(
     py::object file,
     std::optional<std::string> format,
+    bool return_metadata,
     StreamOrDevice s) {
   if (!format.has_value()) {
     std::string fname;
@@ -248,7 +262,7 @@ DictOrArray mlx_load_helper(
       fname = file.attr("name").cast<std::string>();
     } else {
       throw std::invalid_argument(
-          "[load] Input must be a file-like object, or string");
+          "[load] Input must be a file-like object opened in binary mode, or string");
     }
     size_t ext = fname.find_last_of('.');
     if (ext == std::string::npos) {
@@ -258,12 +272,27 @@ DictOrArray mlx_load_helper(
     format.emplace(fname.substr(ext + 1));
   }
 
+  if (return_metadata && (format.value() == "npy" || format.value() == "npz")) {
+    throw std::invalid_argument(
+        "[load] metadata not supported for format " + format.value());
+  }
   if (format.value() == "safetensors") {
-    return mlx_load_safetensor_helper(file, s);
+    auto [dict, metadata] = mlx_load_safetensor_helper(file, s);
+    if (return_metadata) {
+      return std::make_pair(dict, metadata);
+    }
+    return dict;
   } else if (format.value() == "npz") {
     return mlx_load_npz_helper(file, s);
   } else if (format.value() == "npy") {
     return mlx_load_npy_helper(file, s);
+  } else if (format.value() == "gguf") {
+    auto [weights, metadata] = mlx_load_gguf_helper(file, s);
+    if (return_metadata) {
+      return std::make_pair(weights, metadata);
+    } else {
+      return weights;
+    }
   } else {
     throw std::invalid_argument("[load] Unknown file format " + format.value());
   }
@@ -345,19 +374,15 @@ class PyFileWriter : public io::Writer {
   py::object tell_func_;
 };
 
-void mlx_save_helper(
-    py::object file,
-    array a,
-    std::optional<bool> retain_graph_) {
-  bool retain_graph = retain_graph_.value_or(a.is_tracer());
+void mlx_save_helper(py::object file, array a) {
   if (py::isinstance<py::str>(file)) {
-    save(py::cast<std::string>(file), a, retain_graph);
+    save(py::cast<std::string>(file), a);
     return;
   } else if (is_ostream_object(file)) {
     auto writer = std::make_shared<PyFileWriter>(file);
     {
       py::gil_scoped_release gil;
-      save(writer, a, retain_graph);
+      save(writer, a);
     }
 
     return;
@@ -413,8 +438,8 @@ void mlx_savez_helper(
     auto py_ostream = zipfile_object.open(fname, 'w');
     auto writer = std::make_shared<PyFileWriter>(py_ostream);
     {
-      py::gil_scoped_release gil;
-      save(writer, a, /*retain_graph=*/a.is_tracer());
+      py::gil_scoped_release nogil;
+      save(writer, a);
     }
   }
 
@@ -424,21 +449,57 @@ void mlx_savez_helper(
 void mlx_save_safetensor_helper(
     py::object file,
     py::dict d,
-    std::optional<bool> retain_graph) {
+    std::optional<py::dict> m) {
+  std::unordered_map<std::string, std::string> metadata_map;
+  if (m) {
+    try {
+      metadata_map =
+          m.value().cast<std::unordered_map<std::string, std::string>>();
+    } catch (const py::cast_error& e) {
+      throw std::invalid_argument(
+          "[save_safetensors] Metadata must be a dictionary with string keys and values");
+    }
+  } else {
+    metadata_map = std::unordered_map<std::string, std::string>();
+  }
   auto arrays_map = d.cast<std::unordered_map<std::string, array>>();
   if (py::isinstance<py::str>(file)) {
-    save_safetensors(py::cast<std::string>(file), arrays_map, retain_graph);
-    return;
+    {
+      py::gil_scoped_release nogil;
+      save_safetensors(py::cast<std::string>(file), arrays_map, metadata_map);
+    }
   } else if (is_ostream_object(file)) {
     auto writer = std::make_shared<PyFileWriter>(file);
     {
-      py::gil_scoped_release gil;
-      save_safetensors(writer, arrays_map, retain_graph);
+      py::gil_scoped_release nogil;
+      save_safetensors(writer, arrays_map, metadata_map);
     }
-
-    return;
+  } else {
+    throw std::invalid_argument(
+        "[save_safetensors] Input must be a file-like object, or string");
   }
+}
 
-  throw std::invalid_argument(
-      "[save_safetensors] Input must be a file-like object, or string");
+void mlx_save_gguf_helper(
+    py::object file,
+    py::dict a,
+    std::optional<py::dict> m) {
+  auto arrays_map = a.cast<std::unordered_map<std::string, array>>();
+  if (py::isinstance<py::str>(file)) {
+    if (m) {
+      auto metadata_map =
+          m.value().cast<std::unordered_map<std::string, GGUFMetaData>>();
+      {
+        py::gil_scoped_release nogil;
+        save_gguf(py::cast<std::string>(file), arrays_map, metadata_map);
+      }
+    } else {
+      {
+        py::gil_scoped_release nogil;
+        save_gguf(py::cast<std::string>(file), arrays_map);
+      }
+    }
+  } else {
+    throw std::invalid_argument("[save_gguf] Input must be a string");
+  }
 }

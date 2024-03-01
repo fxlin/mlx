@@ -4,6 +4,7 @@ import argparse
 import math
 import os
 import time
+from functools import partial
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -59,13 +60,61 @@ def matmul(x, y):
     mx.eval(ys)
 
 
-def quant_matmul(x, w, s, b):
-    groups = x.shape[-1] // s.shape[-1]
-    width = 32 // (x.shape[-1] // w.shape[0])
+def _quant_matmul(x, w, s, b, transpose, group_size, bits):
     ys = []
     for i in range(10):
-        ys.append(mx.quantized_matmul(x, w, s, b, groups=groups, width=width))
+        ys.append(
+            mx.quantized_matmul(
+                x, w, s, b, transpose=transpose, group_size=group_size, bits=bits
+            )
+        )
     mx.eval(ys)
+
+
+quant_matmul = {
+    "quant_matmul_32_2": partial(_quant_matmul, transpose=False, group_size=32, bits=2),
+    "quant_matmul_32_4": partial(_quant_matmul, transpose=False, group_size=32, bits=4),
+    "quant_matmul_32_8": partial(_quant_matmul, transpose=False, group_size=32, bits=8),
+    "quant_matmul_64_2": partial(_quant_matmul, transpose=False, group_size=64, bits=2),
+    "quant_matmul_64_4": partial(_quant_matmul, transpose=False, group_size=64, bits=4),
+    "quant_matmul_64_8": partial(_quant_matmul, transpose=False, group_size=64, bits=8),
+    "quant_matmul_128_2": partial(
+        _quant_matmul, transpose=False, group_size=128, bits=2
+    ),
+    "quant_matmul_128_4": partial(
+        _quant_matmul, transpose=False, group_size=128, bits=4
+    ),
+    "quant_matmul_128_8": partial(
+        _quant_matmul, transpose=False, group_size=128, bits=8
+    ),
+    "quant_matmul_t_32_2": partial(
+        _quant_matmul, transpose=True, group_size=32, bits=2
+    ),
+    "quant_matmul_t_32_4": partial(
+        _quant_matmul, transpose=True, group_size=32, bits=4
+    ),
+    "quant_matmul_t_32_8": partial(
+        _quant_matmul, transpose=True, group_size=32, bits=8
+    ),
+    "quant_matmul_t_64_2": partial(
+        _quant_matmul, transpose=True, group_size=64, bits=2
+    ),
+    "quant_matmul_t_64_4": partial(
+        _quant_matmul, transpose=True, group_size=64, bits=4
+    ),
+    "quant_matmul_t_64_8": partial(
+        _quant_matmul, transpose=True, group_size=64, bits=8
+    ),
+    "quant_matmul_t_128_2": partial(
+        _quant_matmul, transpose=True, group_size=128, bits=2
+    ),
+    "quant_matmul_t_128_4": partial(
+        _quant_matmul, transpose=True, group_size=128, bits=4
+    ),
+    "quant_matmul_t_128_8": partial(
+        _quant_matmul, transpose=True, group_size=128, bits=8
+    ),
+}
 
 
 def conv1d(x, y):
@@ -220,6 +269,13 @@ def linear(w, b, x):
     mx.eval(ys)
 
 
+def linear_fused(w, b, x):
+    ys = []
+    for i in range(10):
+        ys.append(mx.addmm(b, x, mx.transpose(w, (1, 0))))
+    mx.eval(ys)
+
+
 def rope(x):
     *_, N, D = x.shape
     ys = []
@@ -356,11 +412,14 @@ if __name__ == "__main__":
     elif args.benchmark == "matmul":
         print(bench(matmul, *xs))
 
-    elif args.benchmark == "quant_matmul":
-        print(bench(quant_matmul, *xs))
+    elif args.benchmark.startswith("quant_matmul"):
+        print(bench(quant_matmul[args.benchmark], *xs))
 
     elif args.benchmark == "linear":
-        print(bench(linear, *xs))
+        if args.fused:
+            print(bench(linear_fused, *xs))
+        else:
+            print(bench(linear, *xs))
 
     elif args.benchmark == "sum_axis":
         print(bench(reduction, "sum", axis, x))

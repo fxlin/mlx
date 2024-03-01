@@ -25,6 +25,9 @@ Operations
    argpartition
    argsort
    array_equal
+   atleast_1d
+   atleast_2d
+   atleast_3d
    broadcast_to
    ceil
    clip
@@ -32,10 +35,14 @@ Operations
    convolve
    conv1d
    conv2d
+   conv_general
    cos
    cosh
    dequantize
+   diag
+   diagonal
    divide
+   divmod
    equal
    erf
    erfinv
@@ -49,6 +56,11 @@ Operations
    greater
    greater_equal
    identity
+   inner
+   isnan
+   isposinf
+   isneginf
+   isinf
    less
    less_equal
    linspace
@@ -59,6 +71,8 @@ Operations
    log1p
    logaddexp
    logical_not
+   logical_and
+   logical_or
    logsumexp
    matmul
    max
@@ -71,6 +85,7 @@ Operations
    negative
    ones
    ones_like
+   outer
    partition
    pad
    prod
@@ -84,6 +99,7 @@ Operations
    save
    savez
    savez_compressed
+   save_gguf
    save_safetensors
    sigmoid
    sign

@@ -16,6 +16,9 @@ void init_transforms(py::module_&);
 void init_random(py::module_&);
 void init_fft(py::module_&);
 void init_linalg(py::module_&);
+void init_constants(py::module_&);
+void init_extensions(py::module_&);
+void init_utils(py::module_&);
 
 PYBIND11_MODULE(core, m) {
   m.doc() = "mlx: A framework for machine learning on Apple silicon.";
@@ -31,5 +34,9 @@ PYBIND11_MODULE(core, m) {
   init_random(m);
   init_fft(m);
   init_linalg(m);
+  init_constants(m);
+  init_extensions(m);
+  init_utils(m);
+
   m.attr("__version__") = TOSTRING(_VERSION_);
 }

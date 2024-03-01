@@ -1,20 +1,15 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #pragma once
 
 #include <optional>
-#include <variant>
 
-#include "array.h"
-#include "device.h"
-#include "io/load.h"
-#include "stream.h"
+#include "mlx/array.h"
+#include "mlx/device.h"
+#include "mlx/stream.h"
+#include "mlx/utils.h"
 
 namespace mlx::core {
-
-using StreamOrDevice = std::variant<std::monostate, Stream, Device>;
-
-Stream to_stream(StreamOrDevice s);
 
 /** Creation operations */
 
@@ -124,8 +119,8 @@ inline array tri(int n, Dtype type, StreamOrDevice s = {}) {
   return tri(n, n, 0, type, s);
 }
 
-array tril(array x, int k, StreamOrDevice s = {});
-array triu(array x, int k, StreamOrDevice s = {});
+array tril(array x, int k = 0, StreamOrDevice s = {});
+array triu(array x, int k = 0, StreamOrDevice s = {});
 
 /** array manipulation */
 
@@ -217,6 +212,8 @@ array stack(const std::vector<array>& arrays, StreamOrDevice s = {});
 /** Repeat an array along an axis. */
 array repeat(const array& arr, int repeats, int axis, StreamOrDevice s = {});
 array repeat(const array& arr, int repeats, StreamOrDevice s = {});
+
+array tile(const array& arr, std::vector<int> reps, StreamOrDevice s = {});
 
 /** Permutes the dimensions according to the given axes. */
 array transpose(const array& a, std::vector<int> axes, StreamOrDevice s = {});
@@ -374,6 +371,14 @@ array_equal(const array& a, const array& b, StreamOrDevice s = {}) {
   return array_equal(a, b, false, s);
 }
 
+array isnan(const array& a, StreamOrDevice s = {});
+
+array isinf(const array& a, StreamOrDevice s = {});
+
+array isposinf(const array& a, StreamOrDevice s = {});
+
+array isneginf(const array& a, StreamOrDevice s = {});
+
 /** Select from x or y depending on condition. */
 array where(
     const array& condition,
@@ -395,6 +400,17 @@ array allclose(
     const array& b,
     double rtol = 1e-5,
     double atol = 1e-8,
+    bool equal_nan = false,
+    StreamOrDevice s = {});
+
+/** Returns a boolean array where two arrays are element-wise equal within the
+ * specified tolerance. */
+array isclose(
+    const array& a,
+    const array& b,
+    double rtol = 1e-5,
+    double atol = 1e-8,
+    bool equal_nan = false,
     StreamOrDevice s = {});
 
 /**
@@ -668,6 +684,14 @@ array sign(const array& a, StreamOrDevice s = {});
 /** Logical not of an array */
 array logical_not(const array& a, StreamOrDevice s = {});
 
+/** Logical and of two arrays */
+array logical_and(const array& a, const array& b, StreamOrDevice s = {});
+array operator&&(const array& a, const array& b);
+
+/** Logical or of two arrays */
+array logical_or(const array& a, const array& b, StreamOrDevice s = {});
+array operator||(const array& a, const array& b);
+
 /** The reciprocal (1/x) of the elements in an array. */
 array reciprocal(const array& a, StreamOrDevice s = {});
 
@@ -712,6 +736,10 @@ array divide(const array& a, const array& b, StreamOrDevice s = {});
 array operator/(const array& a, const array& b);
 array operator/(double a, const array& b);
 array operator/(const array& a, double b);
+
+/** Compute the element-wise quotient and remainder. */
+std::vector<array>
+divmod(const array& a, const array& b, StreamOrDevice s = {});
 
 /** Compute integer division. Equivalent to doing floor(a / x). */
 array floor_divide(const array& a, const array& b, StreamOrDevice s = {});
@@ -998,6 +1026,43 @@ array cummin(
 
 /** Convolution operations */
 
+/** General convolution with a filter */
+array conv_general(
+    array input,
+    array weight,
+    std::vector<int> stride = {},
+    std::vector<int> padding_lo = {},
+    std::vector<int> padding_hi = {},
+    std::vector<int> kernel_dilation = {},
+    std::vector<int> input_dilation = {},
+    int groups = 1,
+    bool flip = false,
+    StreamOrDevice s = {});
+
+/** General convolution with a filter */
+inline array conv_general(
+    const array& input,
+    const array& weight,
+    std::vector<int> stride = {},
+    std::vector<int> padding = {},
+    std::vector<int> kernel_dilation = {},
+    std::vector<int> input_dilation = {},
+    int groups = 1,
+    bool flip = false,
+    StreamOrDevice s = {}) {
+  return conv_general(
+      /* const array& input = */ input,
+      /* const array& weight = */ weight,
+      /* std::vector<int> stride = */ stride,
+      /* std::vector<int> padding_lo = */ padding,
+      /* std::vector<int> padding_hi = */ padding,
+      /* std::vector<int> kernel_dilation = */ kernel_dilation,
+      /* std::vector<int> input_dilation = */ input_dilation,
+      /* int groups = */ groups,
+      /* bool flip = */ flip,
+      /* StreamOrDevice s = */ s);
+}
+
 /** 1D convolution with a filter */
 array conv1d(
     const array& input,
@@ -1018,29 +1083,13 @@ array conv2d(
     int groups = 1,
     StreamOrDevice s = {});
 
-/** Serialization operations */
-
-/** Save array to out stream in .npy format */
-void save(
-    std::shared_ptr<io::Writer> out_stream,
-    array a,
-    bool retain_graph = true);
-
-/** Save array to file in .npy format */
-void save(const std::string& file, array a, bool retain_graph = true);
-
-/** Load array from reader in .npy format */
-array load(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s = {});
-
-/** Load array from file in .npy format */
-array load(const std::string& file, StreamOrDevice s = {});
-
 /** Quantized matmul multiplies x with a quantized matrix w*/
 array quantized_matmul(
     const array& x,
     const array& w,
     const array& scales,
     const array& biases,
+    bool transpose = true,
     int group_size = 64,
     int bits = 4,
     StreamOrDevice s = {});
@@ -1074,20 +1123,53 @@ array tensordot(
     const std::pair<std::vector<int>, std::vector<int>>& dims,
     StreamOrDevice s = {});
 
-/** Load array map from .safetensors file format */
-std::unordered_map<std::string, array> load_safetensors(
-    std::shared_ptr<io::Reader> in_stream,
-    StreamOrDevice s = {});
-std::unordered_map<std::string, array> load_safetensors(
-    const std::string& file,
+/** Compute the outer product of two vectors. */
+array outer(const array& a, const array& b, StreamOrDevice s = {});
+
+/** Compute the inner product of two vectors. */
+array inner(const array& a, const array& b, StreamOrDevice s = {});
+
+/** Compute D = beta * C + alpha * (A @ B) */
+array addmm(
+    array c,
+    array a,
+    array b,
+    const float& alpha = 1.f,
+    const float& beta = 1.f,
     StreamOrDevice s = {});
 
-void save_safetensors(
-    std::shared_ptr<io::Writer> in_stream,
-    std::unordered_map<std::string, array>,
-    std::optional<bool> retain_graph = std::nullopt);
-void save_safetensors(
-    const std::string& file,
-    std::unordered_map<std::string, array>,
-    std::optional<bool> retain_graph = std::nullopt);
+/** Extract a diagonal or construct a diagonal array */
+array diagonal(
+    const array& a,
+    int offset = 0,
+    int axis1 = 0,
+    int axis2 = 1,
+    StreamOrDevice s = {});
+
+/** Extract diagonal from a 2d array or create a diagonal matrix. */
+array diag(const array& a, int k = 0, StreamOrDevice s = {});
+
+/**
+ * Implements the identity function but allows injecting dependencies to other
+ * arrays. This ensures that these other arrays will have been computed
+ * when the outputs of this function are computed.
+ */
+std::vector<array> depends(
+    const std::vector<array>& inputs,
+    const std::vector<array>& dependencies);
+
+/** convert an array to an atleast ndim array */
+array atleast_1d(const array& a, StreamOrDevice s = {});
+std::vector<array> atleast_1d(
+    const std::vector<array>& a,
+    StreamOrDevice s = {});
+array atleast_2d(const array& a, StreamOrDevice s = {});
+std::vector<array> atleast_2d(
+    const std::vector<array>& a,
+    StreamOrDevice s = {});
+array atleast_3d(const array& a, StreamOrDevice s = {});
+std::vector<array> atleast_3d(
+    const std::vector<array>& a,
+    StreamOrDevice s = {});
+
 } // namespace mlx::core

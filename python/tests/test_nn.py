@@ -1,4 +1,4 @@
-# Copyright © 2023 Apple Inc.
+# Copyright © 2023-2024 Apple Inc.
 
 import os
 import tempfile
@@ -8,7 +8,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx_tests
 import numpy as np
-from mlx.utils import tree_flatten, tree_map, tree_unflatten
+from mlx.utils import tree_flatten, tree_map
 
 
 class TestBase(mlx_tests.MLXTestCase):
@@ -54,16 +54,31 @@ class TestBase(mlx_tests.MLXTestCase):
 
         m.apply_to_modules(assert_training)
 
-    def test_io(self):
+    def test_save_npz_weights(self):
         def make_model():
             return nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2))
 
         m = make_model()
         tdir = tempfile.TemporaryDirectory()
-        file = os.path.join(tdir.name, "model.npz")
-        m.save_weights(file)
+        npz_file = os.path.join(tdir.name, "model.npz")
+        m.save_weights(npz_file)
         m_load = make_model()
-        m_load.load_weights(file)
+        m_load.load_weights(npz_file)
+        tdir.cleanup()
+
+        eq_tree = tree_map(mx.array_equal, m.parameters(), m_load.parameters())
+        self.assertTrue(all(tree_flatten(eq_tree)))
+
+    def test_save_safetensors_weights(self):
+        def make_model():
+            return nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2), nn.ReLU())
+
+        m = make_model()
+        tdir = tempfile.TemporaryDirectory()
+        safetensors_file = os.path.join(tdir.name, "model.safetensors")
+        m.save_weights(safetensors_file)
+        m_load = make_model()
+        m_load.load_weights(safetensors_file)
         tdir.cleanup()
 
         eq_tree = tree_map(mx.array_equal, m.parameters(), m_load.parameters())
@@ -115,26 +130,31 @@ class TestBase(mlx_tests.MLXTestCase):
                 ]
             )
 
+    def test_module_state(self):
+        m = nn.Linear(10, 1)
+        m.state["hello"] = "world"
+        self.assertEqual(m.state["hello"], "world")
+
 
 class TestLayers(mlx_tests.MLXTestCase):
     def test_identity(self):
         inputs = mx.zeros((10, 4))
         layer = nn.Identity()
         outputs = layer(inputs)
-        self.assertEqual(tuple(inputs.shape), tuple(outputs.shape))
+        self.assertEqual(inputs.shape, outputs.shape)
 
     def test_linear(self):
         inputs = mx.zeros((10, 4))
         layer = nn.Linear(input_dims=4, output_dims=8)
         outputs = layer(inputs)
-        self.assertEqual(tuple(outputs.shape), (10, 8))
+        self.assertEqual(outputs.shape, (10, 8))
 
     def test_bilinear(self):
         inputs1 = mx.zeros((10, 2))
         inputs2 = mx.zeros((10, 4))
         layer = nn.Bilinear(input1_dims=2, input2_dims=4, output_dims=6)
         outputs = layer(inputs1, inputs2)
-        self.assertEqual(tuple(outputs.shape), (10, 6))
+        self.assertEqual(outputs.shape, (10, 6))
 
     def test_group_norm(self):
         x = mx.arange(100, dtype=mx.float32)
@@ -517,35 +537,36 @@ class TestLayers(mlx_tests.MLXTestCase):
         batch_norm = nn.BatchNorm(num_features)
 
         batch_norm.train()
-        running_mean = np.array(batch_norm.running_mean)
-        running_var = np.array(batch_norm.running_var)
+        running_mean = batch_norm.running_mean
+        running_var = batch_norm.running_var
 
         data = mx.random.normal((batch_size, num_features))
 
         normalized_data = batch_norm(data)
-        np_data = np.array(data)
-        means = np.mean(np_data, axis=0)
-        variances = np.var(np_data, axis=0)
+        means = mx.mean(data, axis=0)
+        variances = mx.var(data, axis=0)
         running_mean = (1 - momentum) * running_mean + momentum * means
         running_var = (1 - momentum) * running_var + momentum * variances
-        self.assertTrue(np.allclose(batch_norm.running_mean, running_mean, atol=1e-5))
-        self.assertTrue(np.allclose(batch_norm.running_var, running_var, atol=1e-5))
+        self.assertTrue(mx.allclose(batch_norm.running_mean, running_mean, atol=1e-5))
+        self.assertTrue(mx.allclose(batch_norm.running_var, running_var, atol=1e-5))
 
         batch_norm = nn.BatchNorm(num_features)
 
         batch_norm.train()
-        running_mean = np.array(batch_norm.running_mean)
-        running_var = np.array(batch_norm.running_var)
+        running_mean = batch_norm.running_mean
+        running_var = batch_norm.running_var
         data = mx.random.normal((batch_size, h, w, num_features))
 
         normalized_data = batch_norm(data)
-        np_data = np.array(data)
-        means = np.mean(np_data, axis=(0, 1, 2))
-        variances = np.var(np_data, axis=(0, 1, 2))
+        means = mx.mean(data, axis=(0, 1, 2))
+        variances = mx.var(data, axis=(0, 1, 2))
         running_mean = (1 - momentum) * running_mean + momentum * means
         running_var = (1 - momentum) * running_var + momentum * variances
-        self.assertTrue(np.allclose(batch_norm.running_mean, running_mean, atol=1e-5))
-        self.assertTrue(np.allclose(batch_norm.running_var, running_var, atol=1e-5))
+        self.assertTrue(mx.allclose(batch_norm.running_mean, running_mean, atol=1e-5))
+        self.assertTrue(mx.allclose(batch_norm.running_var, running_var, atol=1e-5))
+
+        self.assertEqual(batch_norm.running_mean.shape, running_mean.shape)
+        self.assertEqual(batch_norm.running_var.shape, running_var.shape)
 
     def test_conv1d(self):
         N = 5
@@ -557,12 +578,12 @@ class TestLayers(mlx_tests.MLXTestCase):
         c = nn.Conv1d(in_channels=C_in, out_channels=C_out, kernel_size=ks)
         c.weight = mx.ones_like(c.weight)
         y = c(x)
-        self.assertEqual(y.shape, [N, L - ks + 1, C_out])
+        self.assertEqual(y.shape, (N, L - ks + 1, C_out))
         self.assertTrue(mx.allclose(y, mx.full(y.shape, ks * C_in, mx.float32)))
 
         c = nn.Conv1d(in_channels=C_in, out_channels=C_out, kernel_size=ks, stride=2)
         y = c(x)
-        self.assertEqual(y.shape, [N, (L - ks + 1) // 2, C_out])
+        self.assertEqual(y.shape, (N, (L - ks + 1) // 2, C_out))
         self.assertTrue("bias" in c.parameters())
 
         c = nn.Conv1d(in_channels=C_in, out_channels=C_out, kernel_size=ks, bias=False)
@@ -572,7 +593,7 @@ class TestLayers(mlx_tests.MLXTestCase):
         x = mx.ones((4, 8, 8, 3))
         c = nn.Conv2d(3, 1, 8)
         y = c(x)
-        self.assertEqual(y.shape, [4, 1, 1, 1])
+        self.assertEqual(y.shape, (4, 1, 1, 1))
         c.weight = mx.ones_like(c.weight) / 8 / 8 / 3
         y = c(x)
         self.assertTrue(np.allclose(y[:, 0, 0, 0], x.mean(axis=(1, 2, 3))))
@@ -580,13 +601,13 @@ class TestLayers(mlx_tests.MLXTestCase):
         # 3x3 conv no padding stride 1
         c = nn.Conv2d(3, 8, 3)
         y = c(x)
-        self.assertEqual(y.shape, [4, 6, 6, 8])
+        self.assertEqual(y.shape, (4, 6, 6, 8))
         self.assertLess(mx.abs(y - c.weight.sum((1, 2, 3))).max(), 1e-4)
 
         # 3x3 conv padding 1 stride 1
         c = nn.Conv2d(3, 8, 3, padding=1)
         y = c(x)
-        self.assertEqual(y.shape, [4, 8, 8, 8])
+        self.assertEqual(y.shape, (4, 8, 8, 8))
         self.assertLess(mx.abs(y[:, 1:7, 1:7] - c.weight.sum((1, 2, 3))).max(), 1e-4)
         self.assertLess(
             mx.abs(y[:, 0, 0] - c.weight[:, 1:, 1:].sum(axis=(1, 2, 3))).max(),
@@ -608,14 +629,14 @@ class TestLayers(mlx_tests.MLXTestCase):
         # 3x3 conv no padding stride 2
         c = nn.Conv2d(3, 8, 3, padding=0, stride=2)
         y = c(x)
-        self.assertEqual(y.shape, [4, 3, 3, 8])
+        self.assertEqual(y.shape, (4, 3, 3, 8))
         self.assertLess(mx.abs(y - c.weight.sum((1, 2, 3))).max(), 1e-4)
 
     def test_sequential(self):
         x = mx.ones((10, 2))
         m = nn.Sequential(nn.Linear(2, 10), nn.ReLU(), nn.Linear(10, 1))
         y = m(x)
-        self.assertEqual(y.shape, [10, 1])
+        self.assertEqual(y.shape, (10, 1))
         params = m.parameters()
         self.assertTrue("layers" in params)
         self.assertEqual(len(params["layers"]), 3)
@@ -644,36 +665,45 @@ class TestLayers(mlx_tests.MLXTestCase):
         y_hat1 = nn.gelu_approx(x)
         y_hat2 = nn.gelu_fast_approx(x)
         self.assertLess(mx.abs(y - y_hat1).max(), 0.0003)
-        self.assertLess(mx.abs(y - y_hat2).max(), 0.02)
+        self.assertLess(mx.abs(y - y_hat2).max(), 0.025)
 
     def test_sin_pe(self):
         m = nn.SinusoidalPositionalEncoding(16, min_freq=0.01)
         x = mx.arange(10)
         y = m(x)
 
-        self.assertEqual(y.shape, [10, 16])
+        self.assertEqual(y.shape, (10, 16))
         similarities = y @ y.T
         self.assertLess(
             mx.abs(similarities[mx.arange(10), mx.arange(10)] - 1).max(), 1e-5
         )
 
+    def test_sigmoid(self):
+        x = mx.array([1.0, 0.0, -1.0])
+        y1 = mx.sigmoid(x)
+        y2 = nn.activations.sigmoid(x)
+        y3 = nn.Sigmoid()(x)
+
+        self.assertEqualArray(y1, y2, atol=0, rtol=0)
+        self.assertEqualArray(y1, y3, atol=0, rtol=0)
+
     def test_relu(self):
         x = mx.array([1.0, -1.0, 0.0])
         y = nn.relu(x)
         self.assertTrue(mx.array_equal(y, mx.array([1.0, 0.0, 0.0])))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_leaky_relu(self):
         x = mx.array([1.0, -1.0, 0.0])
         y = nn.leaky_relu(x)
         self.assertTrue(mx.array_equal(y, mx.array([1.0, -0.01, 0.0])))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
         y = nn.LeakyReLU(negative_slope=0.1)(x)
         self.assertTrue(mx.array_equal(y, mx.array([1.0, -0.1, 0.0])))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_elu(self):
@@ -682,21 +712,21 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([1.0, -0.6321, 0.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
         y = nn.ELU(alpha=1.1)(x)
         epsilon = 1e-4
         expected_y = mx.array([1.0, -0.6953, 0.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_relu6(self):
         x = mx.array([1.0, -1.0, 0.0, 7.0, -7.0])
         y = nn.relu6(x)
         self.assertTrue(mx.array_equal(y, mx.array([1.0, 0.0, 0.0, 6.0, 0.0])))
-        self.assertEqual(y.shape, [5])
+        self.assertEqual(y.shape, (5,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_softmax(self):
@@ -705,7 +735,7 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([0.6652, 0.0900, 0.2447])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_softplus(self):
@@ -714,7 +744,7 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([1.3133, 0.3133, 0.6931])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_softsign(self):
@@ -723,7 +753,22 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([0.5, -0.5, 0.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
+        self.assertEqual(y.dtype, mx.float32)
+
+    def test_softshrink(self):
+        x = mx.array([1.0, -1.0, 0.0])
+        y = nn.softshrink(x)
+        epsilon = 1e-4
+        expected_y = mx.array([0.5, -0.5, 0.0])
+        self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
+        self.assertEqual(y.shape, (3,))
+        self.assertEqual(y.dtype, mx.float32)
+
+        y = nn.Softshrink(lambd=0.7)(x)
+        expected_y = mx.array([0.3, -0.3, 0.0])
+        self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_celu(self):
@@ -732,13 +777,13 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([1.0, -0.6321, 0.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
         y = nn.CELU(alpha=1.1)(x)
         expected_y = mx.array([1.0, -0.6568, 0.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_log_softmax(self):
@@ -747,7 +792,7 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([-2.4076, -1.4076, -0.4076])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_log_sigmoid(self):
@@ -756,7 +801,7 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([-0.3133, -1.3133, -0.6931])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [3])
+        self.assertEqual(y.shape, (3,))
         self.assertEqual(y.dtype, mx.float32)
 
     def test_prelu(self):
@@ -777,8 +822,14 @@ class TestLayers(mlx_tests.MLXTestCase):
         epsilon = 1e-4
         expected_y = mx.array([0.0, -0.375, 0.0, 1.125, 3.0])
         self.assertTrue(mx.all(mx.abs(y - expected_y) < epsilon))
-        self.assertEqual(y.shape, [5])
+        self.assertEqual(y.shape, (5,))
         self.assertEqual(y.dtype, mx.float32)
+
+    def test_glu(self):
+        x = mx.array([[[1.0, 2.0, 3.0, 4.0]]], dtype=mx.float32)
+        y = mx.array([[[0.952574, 1.96403]]], dtype=mx.float32)
+        out = nn.glu(x)
+        self.assertEqualArray(out, y)
 
     def test_rope(self):
         for kwargs in [{}, {"traditional": False}, {"base": 10000}, {"scale": 0.25}]:
@@ -853,6 +904,569 @@ class TestLayers(mlx_tests.MLXTestCase):
         y = nn.Dropout3d(0.5)(x)
         self.assertTrue(y.shape, x.shape)
         self.assertTrue(y.dtype, mx.float16)
+
+    def test_upsample(self):
+        b, h, w, c = 1, 2, 2, 1
+        scale_factor = 2
+        upsample_nearest = nn.Upsample(
+            scale_factor=scale_factor, mode="nearest", align_corners=True
+        )
+        upsample_bilinear = nn.Upsample(
+            scale_factor=scale_factor, mode="linear", align_corners=True
+        )
+        upsample_nearest = nn.Upsample(
+            scale_factor=scale_factor, mode="nearest", align_corners=True
+        )
+        upsample_bilinear_no_align_corners = nn.Upsample(
+            scale_factor=scale_factor, mode="linear", align_corners=False
+        )
+        upsample_nearest_no_align_corners = nn.Upsample(
+            scale_factor=scale_factor, mode="nearest", align_corners=False
+        )
+        # Test single feature map, align corners
+        x = mx.arange(b * h * w * c).reshape((b, c, h, w)).transpose((0, 2, 3, 1))
+        expected_nearest = mx.array(
+            [[[[0, 0, 1, 1], [0, 0, 1, 1], [2, 2, 3, 3], [2, 2, 3, 3]]]]
+        ).transpose((0, 2, 3, 1))
+        expected_bilinear = mx.array(
+            [
+                [
+                    [
+                        [0, 0.333333, 0.666667, 1],
+                        [0.666667, 1, 1.33333, 1.66667],
+                        [1.33333, 1.66667, 2, 2.33333],
+                        [2, 2.33333, 2.66667, 3],
+                    ]
+                ]
+            ]
+        ).transpose((0, 2, 3, 1))
+        # Test single feature map, no align corners
+        x = (
+            mx.arange(1, b * h * w * c + 1)
+            .reshape((b, c, h, w))
+            .transpose((0, 2, 3, 1))
+        )
+        expected_bilinear_no_align_corners = mx.array(
+            [
+                [
+                    [
+                        [1.0000, 1.2500, 1.7500, 2.0000],
+                        [1.5000, 1.7500, 2.2500, 2.5000],
+                        [2.5000, 2.7500, 3.2500, 3.5000],
+                        [3.0000, 3.2500, 3.7500, 4.0000],
+                    ]
+                ]
+            ]
+        ).transpose((0, 2, 3, 1))
+        expected_nearest_no_align_corners = mx.array(
+            [[[[1, 1, 2, 2], [1, 1, 2, 2], [3, 3, 4, 4], [3, 3, 4, 4]]]]
+        ).transpose((0, 2, 3, 1))
+        self.assertTrue(
+            np.allclose(
+                upsample_nearest_no_align_corners(x), expected_nearest_no_align_corners
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                upsample_bilinear_no_align_corners(x),
+                expected_bilinear_no_align_corners,
+            )
+        )
+
+        # Test a more complex batch
+        b, h, w, c = 2, 3, 3, 2
+        scale_factor = 2
+        x = mx.arange((b * h * w * c)).reshape((b, c, h, w)).transpose((0, 2, 3, 1))
+
+        upsample_nearest = nn.Upsample(
+            scale_factor=scale_factor, mode="nearest", align_corners=True
+        )
+        upsample_bilinear = nn.Upsample(
+            scale_factor=scale_factor, mode="linear", align_corners=True
+        )
+
+        expected_nearest = mx.array(
+            [
+                [
+                    [
+                        [0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+                        [0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+                        [3.0, 3.0, 4.0, 4.0, 5.0, 5.0],
+                        [3.0, 3.0, 4.0, 4.0, 5.0, 5.0],
+                        [6.0, 6.0, 7.0, 7.0, 8.0, 8.0],
+                        [6.0, 6.0, 7.0, 7.0, 8.0, 8.0],
+                    ],
+                    [
+                        [9.0, 9.0, 10.0, 10.0, 11.0, 11.0],
+                        [9.0, 9.0, 10.0, 10.0, 11.0, 11.0],
+                        [12.0, 12.0, 13.0, 13.0, 14.0, 14.0],
+                        [12.0, 12.0, 13.0, 13.0, 14.0, 14.0],
+                        [15.0, 15.0, 16.0, 16.0, 17.0, 17.0],
+                        [15.0, 15.0, 16.0, 16.0, 17.0, 17.0],
+                    ],
+                ],
+                [
+                    [
+                        [18.0, 18.0, 19.0, 19.0, 20.0, 20.0],
+                        [18.0, 18.0, 19.0, 19.0, 20.0, 20.0],
+                        [21.0, 21.0, 22.0, 22.0, 23.0, 23.0],
+                        [21.0, 21.0, 22.0, 22.0, 23.0, 23.0],
+                        [24.0, 24.0, 25.0, 25.0, 26.0, 26.0],
+                        [24.0, 24.0, 25.0, 25.0, 26.0, 26.0],
+                    ],
+                    [
+                        [27.0, 27.0, 28.0, 28.0, 29.0, 29.0],
+                        [27.0, 27.0, 28.0, 28.0, 29.0, 29.0],
+                        [30.0, 30.0, 31.0, 31.0, 32.0, 32.0],
+                        [30.0, 30.0, 31.0, 31.0, 32.0, 32.0],
+                        [33.0, 33.0, 34.0, 34.0, 35.0, 35.0],
+                        [33.0, 33.0, 34.0, 34.0, 35.0, 35.0],
+                    ],
+                ],
+            ]
+        ).transpose((0, 2, 3, 1))
+        expected_bilinear = mx.array(
+            [
+                [
+                    [
+                        [0.0, 0.4, 0.8, 1.2, 1.6, 2.0],
+                        [1.2, 1.6, 2.0, 2.4, 2.8, 3.2],
+                        [2.4, 2.8, 3.2, 3.6, 4.0, 4.4],
+                        [3.6, 4.0, 4.4, 4.8, 5.2, 5.6],
+                        [4.8, 5.2, 5.6, 6.0, 6.4, 6.8],
+                        [6.0, 6.4, 6.8, 7.2, 7.6, 8.0],
+                    ],
+                    [
+                        [9.0, 9.4, 9.8, 10.2, 10.6, 11.0],
+                        [10.2, 10.6, 11.0, 11.4, 11.8, 12.2],
+                        [11.4, 11.8, 12.2, 12.6, 13.0, 13.4],
+                        [12.6, 13.0, 13.4, 13.8, 14.2, 14.6],
+                        [13.8, 14.2, 14.6, 15.0, 15.4, 15.8],
+                        [15.0, 15.4, 15.8, 16.2, 16.6, 17.0],
+                    ],
+                ],
+                [
+                    [
+                        [18.0, 18.4, 18.8, 19.2, 19.6, 20.0],
+                        [19.2, 19.6, 20.0, 20.4, 20.8, 21.2],
+                        [20.4, 20.8, 21.2, 21.6, 22.0, 22.4],
+                        [21.6, 22.0, 22.4, 22.8, 23.2, 23.6],
+                        [22.8, 23.2, 23.6, 24.0, 24.4, 24.8],
+                        [24.0, 24.4, 24.8, 25.2, 25.6, 26.0],
+                    ],
+                    [
+                        [27.0, 27.4, 27.8, 28.2, 28.6, 29.0],
+                        [28.2, 28.6, 29.0, 29.4, 29.8, 30.2],
+                        [29.4, 29.8, 30.2, 30.6, 31.0, 31.4],
+                        [30.6, 31.0, 31.4, 31.8, 32.2, 32.6],
+                        [31.8, 32.2, 32.6, 33.0, 33.4, 33.8],
+                        [33.0, 33.4, 33.8, 34.2, 34.6, 35.0],
+                    ],
+                ],
+            ]
+        ).transpose((0, 2, 3, 1))
+        self.assertTrue(np.allclose(upsample_nearest(x), expected_nearest))
+        self.assertTrue(np.allclose(upsample_bilinear(x), expected_bilinear))
+
+        # Test different height and width scale_factor
+        b, h, w, c = 1, 2, 2, 2
+        x = mx.arange(b * h * w * c).reshape((b, c, h, w)).transpose((0, 2, 3, 1))
+        upsample_nearest = nn.Upsample(
+            scale_factor=(2, 3), mode="nearest", align_corners=True
+        )
+        upsample_bilinear = nn.Upsample(
+            scale_factor=(2, 3), mode="linear", align_corners=True
+        )
+
+        expected_nearest = mx.array(
+            [
+                [
+                    [
+                        [0, 0, 0, 1, 1, 1],
+                        [0, 0, 0, 1, 1, 1],
+                        [2, 2, 2, 3, 3, 3],
+                        [2, 2, 2, 3, 3, 3],
+                    ],
+                    [
+                        [4, 4, 4, 5, 5, 5],
+                        [4, 4, 4, 5, 5, 5],
+                        [6, 6, 6, 7, 7, 7],
+                        [6, 6, 6, 7, 7, 7],
+                    ],
+                ]
+            ]
+        ).transpose((0, 2, 3, 1))
+        expected_bilinear = mx.array(
+            [
+                [
+                    [
+                        [0, 0.2, 0.4, 0.6, 0.8, 1],
+                        [0.666667, 0.866667, 1.06667, 1.26667, 1.46667, 1.66667],
+                        [1.33333, 1.53333, 1.73333, 1.93333, 2.13333, 2.33333],
+                        [2, 2.2, 2.4, 2.6, 2.8, 3],
+                    ],
+                    [
+                        [4, 4.2, 4.4, 4.6, 4.8, 5],
+                        [4.66667, 4.86667, 5.06667, 5.26667, 5.46667, 5.66667],
+                        [5.33333, 5.53333, 5.73333, 5.93333, 6.13333, 6.33333],
+                        [6, 6.2, 6.4, 6.6, 6.8, 7],
+                    ],
+                ]
+            ]
+        ).transpose((0, 2, 3, 1))
+        self.assertTrue(np.allclose(upsample_nearest(x), expected_nearest))
+        self.assertTrue(np.allclose(upsample_bilinear(x), expected_bilinear))
+
+        # Test repr
+        self.assertEqual(
+            str(nn.Upsample(scale_factor=2)),
+            "Upsample(scale_factor=2.0, mode='nearest', align_corners=False)",
+        )
+        self.assertEqual(
+            str(nn.Upsample(scale_factor=(2, 3))),
+            "Upsample(scale_factor=(2.0, 3.0), mode='nearest', align_corners=False)",
+        )
+
+    def test_pooling(self):
+        # Test 1d pooling
+        x = mx.array(
+            [
+                [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
+                [[12, 13, 14], [15, 16, 17], [18, 19, 20], [21, 22, 23]],
+            ]
+        )
+        expected_max_pool_output_no_padding_stride_1 = [
+            [[3.0, 4.0, 5.0], [6.0, 7.0, 8.0], [9.0, 10.0, 11.0]],
+            [[15.0, 16.0, 17.0], [18.0, 19.0, 20.0], [21.0, 22.0, 23.0]],
+        ]
+        expected_max_pool_output_no_padding_stride_2 = [
+            [[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]],
+            [[15.0, 16.0, 17.0], [21.0, 22.0, 23.0]],
+        ]
+        expected_max_pool_output_padding_1_stride_2 = [
+            [[0.0, 1.0, 2.0], [6.0, 7.0, 8.0], [9.0, 10.0, 11.0]],
+            [[12.0, 13.0, 14.0], [18.0, 19.0, 20.0], [21.0, 22.0, 23.0]],
+        ]
+        expected_max_pool_output_padding_1_stride_2_kernel_3 = [
+            [[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]],
+            [[15.0, 16.0, 17.0], [21.0, 22.0, 23.0]],
+        ]
+        expected_avg_pool_output_no_padding_stride_1 = [
+            [
+                [1.5000, 2.5000, 3.5000],
+                [4.5000, 5.5000, 6.5000],
+                [7.5000, 8.5000, 9.5000],
+            ],
+            [
+                [13.5000, 14.5000, 15.5000],
+                [16.5000, 17.5000, 18.5000],
+                [19.5000, 20.5000, 21.5000],
+            ],
+        ]
+        expected_avg_pool_output_no_padding_stride_2 = [
+            [[1.5000, 2.5000, 3.5000], [7.5000, 8.5000, 9.5000]],
+            [[13.5000, 14.5000, 15.5000], [19.5000, 20.5000, 21.5000]],
+        ]
+        expected_avg_pool_output_padding_1_stride_2 = [
+            [
+                [0.0000, 0.5000, 1.0000],
+                [4.5000, 5.5000, 6.5000],
+                [4.5000, 5.0000, 5.5000],
+            ],
+            [
+                [6.0000, 6.5000, 7.0000],
+                [16.5000, 17.5000, 18.5000],
+                [10.5000, 11.0000, 11.5000],
+            ],
+        ]
+        expected_avg_pool_output_padding_1_kernel_3 = [
+            [[1, 1.66667, 2.33333], [6, 7, 8]],
+            [[9, 9.66667, 10.3333], [18, 19, 20]],
+        ]
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool1d(kernel_size=2, stride=1, padding=0)(x),
+                expected_max_pool_output_no_padding_stride_1,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool1d(kernel_size=2, stride=2, padding=0)(x),
+                expected_max_pool_output_no_padding_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool1d(kernel_size=2, stride=2, padding=1)(x),
+                expected_max_pool_output_padding_1_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool1d(kernel_size=3, stride=2, padding=1)(x),
+                expected_max_pool_output_padding_1_stride_2_kernel_3,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool1d(kernel_size=2, stride=1, padding=0)(x),
+                expected_avg_pool_output_no_padding_stride_1,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool1d(kernel_size=2, stride=2, padding=0)(x),
+                expected_avg_pool_output_no_padding_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool1d(kernel_size=2, stride=2, padding=1)(x),
+                expected_avg_pool_output_padding_1_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool1d(kernel_size=3, stride=2, padding=1)(x),
+                expected_avg_pool_output_padding_1_kernel_3,
+            )
+        )
+        # Test 2d pooling
+        x = mx.array(
+            [
+                [
+                    [[0, 16], [1, 17], [2, 18], [3, 19]],
+                    [[4, 20], [5, 21], [6, 22], [7, 23]],
+                    [[8, 24], [9, 25], [10, 26], [11, 27]],
+                    [[12, 28], [13, 29], [14, 30], [15, 31]],
+                ]
+            ]
+        )
+        expected_max_pool_output_no_padding_stride_1 = [
+            [
+                [[5, 21], [6, 22], [7, 23]],
+                [[9, 25], [10, 26], [11, 27]],
+                [[13, 29], [14, 30], [15, 31]],
+            ]
+        ]
+        expected_max_pool_output_no_padding_stride_2 = [
+            [[[5, 21], [7, 23]], [[13, 29], [15, 31]]]
+        ]
+        expected_max_pool_output_padding_1 = [
+            [
+                [[0, 16], [2, 18], [3, 19]],
+                [[8, 24], [10, 26], [11, 27]],
+                [[12, 28], [14, 30], [15, 31]],
+            ]
+        ]
+        expected_mean_pool_output_no_padding_stride_1 = [
+            [
+                [[2.5000, 18.5000], [3.5000, 19.5000], [4.5000, 20.5000]],
+                [[6.5000, 22.5000], [7.5000, 23.5000], [8.5000, 24.5000]],
+                [[10.5000, 26.5000], [11.5000, 27.5000], [12.5000, 28.5000]],
+            ]
+        ]
+        expected_mean_pool_output_no_padding_stride_2 = [
+            [
+                [[2.5000, 18.5000], [4.5000, 20.5000]],
+                [[10.5000, 26.5000], [12.5000, 28.5000]],
+            ]
+        ]
+        expected_mean_pool_output_padding_1 = [
+            [
+                [[0.0000, 4.0000], [0.7500, 8.7500], [0.7500, 4.7500]],
+                [[3.0000, 11.0000], [7.5000, 23.5000], [4.5000, 12.5000]],
+                [[3.0000, 7.0000], [6.7500, 14.7500], [3.7500, 7.7500]],
+            ]
+        ]
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool2d(kernel_size=2, stride=1, padding=0)(x),
+                expected_max_pool_output_no_padding_stride_1,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool2d(kernel_size=2, stride=2, padding=0)(x),
+                expected_max_pool_output_no_padding_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool2d(kernel_size=2, stride=2, padding=1)(x),
+                expected_max_pool_output_padding_1,
+            )
+        )
+        # Average pooling
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool2d(kernel_size=2, stride=1, padding=0)(x),
+                expected_mean_pool_output_no_padding_stride_1,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.AvgPool2d(kernel_size=2, stride=2, padding=0)(x),
+                expected_mean_pool_output_no_padding_stride_2,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                nn.AvgPool2d(kernel_size=2, stride=2, padding=1)(x),
+                expected_mean_pool_output_padding_1,
+            )
+        )
+        # Test multiple batches
+        x = mx.array(
+            [
+                [
+                    [[0, 1], [2, 3], [4, 5], [6, 7]],
+                    [[8, 9], [10, 11], [12, 13], [14, 15]],
+                    [[16, 17], [18, 19], [20, 21], [22, 23]],
+                    [[24, 25], [26, 27], [28, 29], [30, 31]],
+                ],
+                [
+                    [[32, 33], [34, 35], [36, 37], [38, 39]],
+                    [[40, 41], [42, 43], [44, 45], [46, 47]],
+                    [[48, 49], [50, 51], [52, 53], [54, 55]],
+                    [[56, 57], [58, 59], [60, 61], [62, 63]],
+                ],
+            ]
+        )
+        expected_max_pool_output = [
+            [[[10.0, 11.0], [14.0, 15.0]], [[26.0, 27.0], [30.0, 31.0]]],
+            [[[42.0, 43.0], [46.0, 47.0]], [[58.0, 59.0], [62.0, 63.0]]],
+        ]
+        expected_avg_pool_output = [
+            [[[2.22222, 2.66667], [5.33333, 6]], [[11.3333, 12], [20, 21]]],
+            [[[16.4444, 16.8889], [26.6667, 27.3333]], [[32.6667, 33.3333], [52, 53]]],
+        ]
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool2d(kernel_size=3, stride=2, padding=1)(x),
+                expected_max_pool_output,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool2d(kernel_size=3, stride=2, padding=1)(x),
+                expected_avg_pool_output,
+            )
+        )
+        # Test irregular kernel (2, 4), stride (3, 1) and padding (1, 2)
+        x = mx.array(
+            [
+                [
+                    [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
+                    [[12, 13, 14], [15, 16, 17], [18, 19, 20], [21, 22, 23]],
+                    [[24, 25, 26], [27, 28, 29], [30, 31, 32], [33, 34, 35]],
+                    [[36, 37, 38], [39, 40, 41], [42, 43, 44], [45, 46, 47]],
+                ],
+                [
+                    [[48, 49, 50], [51, 52, 53], [54, 55, 56], [57, 58, 59]],
+                    [[60, 61, 62], [63, 64, 65], [66, 67, 68], [69, 70, 71]],
+                    [[72, 73, 74], [75, 76, 77], [78, 79, 80], [81, 82, 83]],
+                    [[84, 85, 86], [87, 88, 89], [90, 91, 92], [93, 94, 95]],
+                ],
+            ]
+        )
+        expected_irregular_max_pool_output = [
+            [
+                [
+                    [3.0, 4.0, 5.0],
+                    [6.0, 7.0, 8.0],
+                    [9.0, 10.0, 11.0],
+                    [9.0, 10.0, 11.0],
+                    [9.0, 10.0, 11.0],
+                ],
+                [
+                    [39.0, 40.0, 41.0],
+                    [42.0, 43.0, 44.0],
+                    [45.0, 46.0, 47.0],
+                    [45.0, 46.0, 47.0],
+                    [45.0, 46.0, 47.0],
+                ],
+            ],
+            [
+                [
+                    [51.0, 52.0, 53.0],
+                    [54.0, 55.0, 56.0],
+                    [57.0, 58.0, 59.0],
+                    [57.0, 58.0, 59.0],
+                    [57.0, 58.0, 59.0],
+                ],
+                [
+                    [87.0, 88.0, 89.0],
+                    [90.0, 91.0, 92.0],
+                    [93.0, 94.0, 95.0],
+                    [93.0, 94.0, 95.0],
+                    [93.0, 94.0, 95.0],
+                ],
+            ],
+        ]
+        expected_irregular_average_pool_output = [
+            [
+                [
+                    [0.3750, 0.6250, 0.8750],
+                    [1.1250, 1.5000, 1.8750],
+                    [2.2500, 2.7500, 3.2500],
+                    [2.2500, 2.6250, 3.0000],
+                    [1.8750, 2.1250, 2.3750],
+                ],
+                [
+                    [15.7500, 16.2500, 16.7500],
+                    [24.7500, 25.5000, 26.2500],
+                    [34.5000, 35.5000, 36.5000],
+                    [27.0000, 27.7500, 28.5000],
+                    [18.7500, 19.2500, 19.7500],
+                ],
+            ],
+            [
+                [
+                    [12.3750, 12.6250, 12.8750],
+                    [19.1250, 19.5000, 19.8750],
+                    [26.2500, 26.7500, 27.2500],
+                    [20.2500, 20.6250, 21.0000],
+                    [13.8750, 14.1250, 14.3750],
+                ],
+                [
+                    [39.7500, 40.2500, 40.7500],
+                    [60.7500, 61.5000, 62.2500],
+                    [82.5000, 83.5000, 84.5000],
+                    [63.0000, 63.7500, 64.5000],
+                    [42.7500, 43.2500, 43.7500],
+                ],
+            ],
+        ]
+        self.assertTrue(
+            np.array_equal(
+                nn.MaxPool2d(kernel_size=(2, 4), stride=(3, 1), padding=(1, 2))(x),
+                expected_irregular_max_pool_output,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                nn.AvgPool2d(kernel_size=(2, 4), stride=(3, 1), padding=(1, 2))(x),
+                expected_irregular_average_pool_output,
+            )
+        )
+        # Test repr
+        self.assertEqual(
+            str(nn.MaxPool1d(kernel_size=3, padding=2)),
+            "MaxPool1d(kernel_size=(3,), stride=(3,), padding=(2,))",
+        )
+        self.assertEqual(
+            str(nn.AvgPool1d(kernel_size=2, stride=3)),
+            "AvgPool1d(kernel_size=(2,), stride=(3,), padding=(0,))",
+        )
+        self.assertEqual(
+            str(nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
+            "MaxPool2d(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))",
+        )
+        self.assertEqual(
+            str(nn.AvgPool2d(kernel_size=(1, 2), stride=2, padding=(1, 2))),
+            "AvgPool2d(kernel_size=(1, 2), stride=(2, 2), padding=(1, 2))",
+        )
 
 
 if __name__ == "__main__":

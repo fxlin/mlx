@@ -1,8 +1,6 @@
-// Copyright © 2023 Apple Inc.
-
+// Copyright © 2023-2024 Apple Inc.
 #include <algorithm>
 #include <future>
-#include <map>
 #include <numeric>
 #include <set>
 #include <sstream>
@@ -19,173 +17,97 @@
 
 namespace mlx::core {
 
-void simplify(const std::vector<array>& outputs) {
-  std::function<void(const array&)> recurse;
-  std::queue<array> tape;
-  std::unordered_set<std::uintptr_t> cache;
-  std::unordered_map<std::uintptr_t, std::vector<std::pair<array, int>>>
-      parents_map;
+/* This class is only meant to be used in eval
+ * for synchronizing with the main thread. */
+class Synchronizer : public Primitive {
+ public:
+  explicit Synchronizer(Stream stream) : Primitive(stream){};
 
-  // Helpers to identify identical scalars
-  std::map<std::pair<uint64_t, Dtype::Val>, array> scalars;
-  auto is_scalar = [](const array& a) {
-    return a.is_evaled() && a.ndim() == 0;
-  };
-  auto get_scalar_rep = [](const array& a) {
-    uint64_t v = 0;
-    int dtype;
-    switch (a.dtype().size) {
-      case 1:
-        v = *a.data<uint8_t>();
-        break;
-      case 4:
-        v = *a.data<uint32_t>();
-        break;
-      case 8:
-        v = *a.data<uint64_t>();
-        break;
-    }
-    return std::make_pair(v, a.dtype().val);
-  };
+  void eval_cpu(const std::vector<array>&, std::vector<array>&) override{};
+  void eval_gpu(const std::vector<array>&, std::vector<array>&) override{};
+  void print(std::ostream&) override {}
+};
 
-  // DFS the graph to log the parents
-  recurse = [&](const array& a) {
-    auto id = a.id();
-    if (cache.find(id) != cache.end()) {
-      return;
-    }
-    for (int i = 0; i < a.inputs().size(); i++) {
-      auto& in = a.inputs()[i];
-      parents_map[in.id()].push_back({a, i});
-      recurse(in);
-    }
-    cache.insert(id);
-    tape.push(a);
-    if (is_scalar(a)) {
-      scalars.insert({get_scalar_rep(a), a});
-    }
-  };
-  for (auto& a : outputs) {
-    recurse(a);
-  }
+// Initialize the static tracing counter from transforms_impl.h .
+//
+// This is used to implement the in_tracing() function the returns true if we
+// are currently under a function transformation.
+int detail::InTracing::tracing_counter{0};
 
-  // Helper that fuses two arrays in the graph by setting the parents of the
-  // source to point to the destination
-  auto fuse = [&](array& dst, array& src) {
-    auto src_parents = parents_map.find(src.id());
-    if (src_parents == parents_map.end()) {
-      return;
-    }
-
-    auto& pairs = parents_map[dst.id()];
-    for (auto& parent : src_parents->second) {
-      parent.first.editable_inputs()[parent.second] = dst;
-      pairs.push_back(parent);
-    }
-  };
-
-  // Walk the graph
-  cache.clear();
-
-  // Depth-1 array equivalence check.
-  auto array_equivalent = [](const array& a, const array& b) {
-    if (!a.has_primitive() || !b.has_primitive()) {
-      return false;
-    }
-    const auto& pa = a.primitive();
-    const auto& pb = b.primitive();
-    if (typeid(pa) != typeid(pb)) {
-      return false;
-    }
-
-    if (a.inputs().size() != b.inputs().size()) {
-      return false;
-    }
-
-    for (int i = 0; i < a.inputs().size(); i++) {
-      if (a.inputs()[i].id() != b.inputs()[i].id()) {
-        return false;
-      }
-    }
-
-    return pa.is_equivalent(pb);
-  };
-
-  while (!tape.empty()) {
-    auto arr = std::move(tape.front());
-    tape.pop();
-
-    if (cache.find(arr.id()) != cache.end()) {
-      continue;
-    }
-
-    // Check if we can fuse scalars
-    if (is_scalar(arr)) {
-      auto scalar = scalars.find(get_scalar_rep(arr));
-      if (scalar->second.id() != arr.id()) {
-        fuse(scalar->second, arr);
-        arr = scalar->second;
-      }
-    }
-
-    // Check if we can fuse the parents of this array
-    auto parents = parents_map.find(arr.id());
-    if (parents != parents_map.end()) {
-      std::vector<bool> mask(parents->second.size(), false);
-      auto N = parents->second.size();
-      for (int i = 0; i < N; i++) {
-        if (mask[i]) {
-          continue;
-        }
-        for (int j = i + 1; j < N; j++) {
-          if (mask[j]) {
-            continue;
-          }
-          auto& src = parents->second[j].first;
-          auto& dst = parents->second[i].first;
-          if (src.id() != dst.id() && array_equivalent(src, dst)) {
-            cache.insert(src.id());
-            fuse(dst, src);
-            mask[j] = true;
-          }
-        }
-      }
-    }
-  }
-}
-
-void eval(const std::vector<array>& outputs, bool retain_graph /* = false */) {
-  if (!retain_graph) {
-    for (auto& out : outputs) {
-      if (out.has_primitive() && out.is_tracer()) {
-        throw std::invalid_argument(
-            "[eval] Illegal to eval an array during "
-            "function transform without graph retention.");
-      }
-    }
-  }
-  std::function<void(const array&)> recurse;
+void eval(const std::vector<array>& outputs) {
+  std::function<void(const array&, bool)> recurse;
   std::queue<array> tape;
   std::unordered_set<std::uintptr_t> cache;
   std::unordered_map<std::uintptr_t, std::shared_future<void>> deps;
 
-  recurse = [&](const array& a) {
+  // Make an effort to choose a good output stream
+  Stream stream = default_stream(default_device());
+  for (auto& o : outputs) {
+    if (!o.is_evaled() && o.has_primitive()) {
+      stream = o.primitive().stream();
+      break;
+    }
+  }
+
+  auto synchronizer =
+      array({}, bool_, std::make_unique<Synchronizer>(stream), outputs);
+
+  recurse = [&](const array& a, bool largest_branch_first) {
     auto id = a.id();
     if (cache.find(id) != cache.end()) {
       return;
     }
-    for (auto in : a.inputs()) {
-      recurse(in);
-      // If one of the inputs is being computed on a different
-      // stream, we need to manage the dependency.
+
+    // If the input is being computed on a different stream, we need to manage
+    // the dependency.
+    auto check_dependency = [&](const array& in) {
       if (!in.is_evaled()) {
         if (a.primitive().stream() != in.primitive().stream()) {
-          deps.insert({in.id(), std::shared_future<void>{}});
+          deps.insert({in.primitive_id(), std::shared_future<void>{}});
         }
       }
+    };
+
+    // Recurse to the largest or smallest branch first.
+    size_t num_inputs = a.inputs().size();
+    if (num_inputs == 1) {
+      auto& in = a.inputs()[0];
+      recurse(in, true);
+      check_dependency(in);
+    } else if (num_inputs == 2) {
+      auto depth_1 = a.inputs()[0].graph_depth();
+      auto depth_2 = a.inputs()[1].graph_depth();
+      auto& in1 = a.inputs()[static_cast<int>(
+          !((depth_1 > depth_2) == largest_branch_first))];
+      auto& in2 = a.inputs()[static_cast<int>(
+          ((depth_1 > depth_2) == largest_branch_first))];
+      recurse(in1, true);
+      check_dependency(in1);
+      recurse(in2, true);
+      check_dependency(in2);
+    } else if (num_inputs > 2) {
+      std::vector<int> recursion_order(a.inputs().size());
+      std::iota(recursion_order.begin(), recursion_order.end(), 0);
+      std::sort(
+          recursion_order.begin(),
+          recursion_order.end(),
+          [&a, largest_branch_first](int i, int j) {
+            auto depth_i = a.inputs()[i].graph_depth();
+            auto depth_j = a.inputs()[j].graph_depth();
+            return largest_branch_first ? depth_i > depth_j : depth_j < depth_i;
+          });
+      for (int idx : recursion_order) {
+        auto& in = a.inputs()[idx];
+        recurse(in, true);
+        check_dependency(in);
+      }
     }
+
     cache.insert(id);
-    if (!a.is_evaled() || (!retain_graph && a.has_primitive())) {
+    for (auto& s : a.siblings()) {
+      cache.insert(s.id());
+    }
+    if (!a.is_evaled() || (!a.is_tracer() && a.has_primitive())) {
       if (!a.has_primitive()) {
         throw std::invalid_argument(
             "[eval] Attempting to eval an array without a primitive.");
@@ -194,22 +116,16 @@ void eval(const std::vector<array>& outputs, bool retain_graph /* = false */) {
     }
   };
 
-  for (auto& arr : outputs) {
-    if (!arr.is_evaled() || (!retain_graph && arr.has_primitive())) {
-      recurse(arr);
-      // Insert a dependency for every output to synchronize
-      // with at the end.
-      if (!arr.is_evaled()) {
-        deps.insert({arr.id(), std::shared_future<void>{}});
-      }
-    }
-  }
+  recurse(synchronizer, false);
+  uintptr_t synch_id = synchronizer.primitive_id();
+  deps.insert({synch_id, std::shared_future<void>{}});
 
+  std::vector<std::shared_ptr<std::promise<void>>> ps;
   while (!tape.empty()) {
     auto arr = std::move(tape.front());
     tape.pop();
     if (arr.is_evaled()) {
-      if (!retain_graph && arr.has_primitive()) {
+      if (!arr.is_tracer() && arr.has_primitive()) {
         arr.detach();
       }
       continue;
@@ -218,13 +134,15 @@ void eval(const std::vector<array>& outputs, bool retain_graph /* = false */) {
     auto stream = arr.primitive().stream();
     std::vector<std::shared_future<void>> arr_deps;
     for (auto& in : arr.inputs()) {
-      if (auto it = deps.find(in.id()); it != deps.end()) {
+      // TODO that's a bug
+      if (auto it = deps.find(in.primitive_id()); it != deps.end()) {
         arr_deps.push_back(it->second);
       }
     }
     std::shared_ptr<std::promise<void>> p{nullptr};
-    if (auto it = deps.find(arr.id()); it != deps.end()) {
+    if (auto it = deps.find(arr.primitive_id()); it != deps.end()) {
       p = std::make_unique<std::promise<void>>();
+      ps.push_back(p);
       it->second = p->get_future().share();
     }
 
@@ -233,21 +151,19 @@ void eval(const std::vector<array>& outputs, bool retain_graph /* = false */) {
         throw std::runtime_error("Metal GPU is not available.");
       }
       scheduler::enqueue(
-          stream,
-          metal::make_task(
-              arr, std::move(arr_deps), std::move(p), retain_graph));
+          stream, metal::make_task(arr, std::move(arr_deps), std::move(p)));
     } else {
-      auto task = [retain_graph,
-                   arr,
+      auto task = [arr,
                    stream,
-                   arr_deps = std::move(arr_deps),
+                   deps = std::move(arr_deps),
                    p = std::move(p)]() mutable {
-        for (auto& d : arr_deps) {
+        for (auto& d : deps) {
           d.wait();
         }
         scheduler::notify_new_task(stream);
-        arr.primitive().eval_cpu(arr.inputs(), arr);
-        if (!retain_graph) {
+        auto outputs = arr.outputs();
+        arr.primitive().eval_cpu(arr.inputs(), outputs);
+        if (!arr.is_tracer()) {
           arr.detach();
         }
         if (p) {
@@ -258,17 +174,17 @@ void eval(const std::vector<array>& outputs, bool retain_graph /* = false */) {
       scheduler::enqueue(stream, std::move(task));
     }
   }
-  for (auto& arr : outputs) {
-    if (auto it = deps.find(arr.id()); it != deps.end()) {
-      it->second.wait();
-    }
-  }
+
+  deps[synch_id].wait();
 }
 
 std::pair<std::vector<array>, std::vector<array>> vjp(
     const std::function<std::vector<array>(const std::vector<array>&)>& fun,
     const std::vector<array>& primals,
     const std::vector<array>& cotans) {
+  // Set the global tracing flag.
+  detail::InTracing in_tracing;
+
   // Make tracers from given primals
   std::vector<array> primals_;
   for (auto& p : primals) {
@@ -294,18 +210,27 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
       }
     }
     if (cotan_index >= cotans.size()) {
-      throw std::invalid_argument(
-          "[vjp] Number of outputs with gradient does not match number of cotangents.");
+      std::ostringstream msg;
+      msg << "[vjp] Number of outputs to compute gradients for ("
+          << outputs.size() << ") does not match number of cotangents ("
+          << cotans.size() << ").";
+      throw std::invalid_argument(msg.str());
     }
     if (out.shape() != cotans[cotan_index].shape()) {
-      throw std::invalid_argument(
-          "[vjp] Output shape does not match shape of cotangent.");
+      std::ostringstream msg;
+      msg << "[vjp] Output shape " << out.shape()
+          << " does not match cotangent shape " << cotans[cotan_index].shape()
+          << ".";
+      if (outputs.size() == 1 && out.size() == 1) {
+        msg << " If you are using grad your function must return a scalar.";
+      }
+      throw std::invalid_argument(msg.str());
     }
     output_cotan_pairs.emplace_back(i, cotan_index++);
   }
 
-  // Topologically sort the compute graph, record outputs
-  // in the tape if a gradient is needed.
+  // Topologically sort the compute graph, add graph nodes
+  // to the tape which need a gradient.
   std::unordered_set<std::uintptr_t> cache;
   std::unordered_set<std::uintptr_t> calc_grad;
   for (auto& primal : primals_) {
@@ -318,34 +243,41 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
 
   std::function<void(array&)> recurse;
   recurse = [&](auto& a) {
-    auto id = a.id();
-    a.set_tracer(false);
-
     // Check if visited and add to cache if not
-    if (auto inserted = cache.insert(id); !inserted.second) {
+    if (auto inserted = cache.insert(a.id()); !inserted.second) {
       return;
     }
+    a.set_tracer(false);
+    for (auto s : a.siblings()) {
+      s.set_tracer(false);
+      cache.insert(s.id());
+    }
 
-    for (auto& input : a.editable_inputs()) {
+    for (auto& input : a.inputs()) {
       recurse(input);
     }
 
     // Stop grad
-    if (a.has_primitive() && typeid(a.primitive()) == typeid(StopGradient)) {
-      return;
+    if (a.has_primitive()) {
+      if (auto& p = a.primitive(); typeid(p) == typeid(StopGradient)) {
+        return;
+      }
     }
 
     // Calculate gradient if any inputs require gradient
     for (auto& input : a.inputs()) {
       if (calc_grad.find(input.id()) != calc_grad.end()) {
         tape.push_back(a);
-        calc_grad.insert(id);
+        calc_grad.insert(a.id());
+        for (auto& s : a.siblings()) {
+          calc_grad.insert(s.id());
+        }
         break;
       }
     }
   };
 
-  for (auto& out : outputs) {
+  for (auto out : outputs) {
     recurse(out);
   }
 
@@ -353,7 +285,10 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
   // products for each primitive
   std::unordered_map<std::uintptr_t, array> cotan_map;
   for (auto [out_idx, cotan_idx] : output_cotan_pairs) {
-    cotan_map.insert({outputs[out_idx].id(), cotans[cotan_idx]});
+    auto& o = outputs[out_idx];
+    auto s = o.has_primitive() ? o.primitive().stream()
+                               : default_stream(default_device());
+    cotan_map.insert({o.id(), astype(cotans[cotan_idx], o.dtype(), s)});
   }
   for (auto it = tape.rbegin(); it != tape.rend(); ++it) {
     auto& a = *it;
@@ -366,14 +301,28 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
       }
     }
 
-    auto cotan_it = cotan_map.find(a.id());
-    if (cotan_it == cotan_map.end()) {
+    // Check if any of the array or its siblings have cotangents,
+    // if not, we can skip this primitive
+    auto outputs = a.outputs();
+    bool has_cotans =
+        std::any_of(outputs.cbegin(), outputs.cend(), [&cotan_map](auto& s) {
+          return cotan_map.find(s.id()) != cotan_map.end();
+        });
+    if (!has_cotans) {
       continue;
     }
 
-    auto cotan = cotan_map.extract(cotan_it).mapped();
-    auto vjps = a.primitive().vjp(a.inputs(), cotan, argnums);
     auto s = a.primitive().stream();
+    std::vector<array> cotangents{};
+    for (auto& o : outputs) {
+      if (auto cotan_it = cotan_map.find(o.id()); cotan_it != cotan_map.end()) {
+        cotangents.push_back(cotan_map.extract(cotan_it).mapped());
+      } else {
+        cotangents.push_back(zeros_like(o, s));
+      }
+    }
+
+    auto vjps = a.primitive().vjp(a.inputs(), cotangents, argnums, outputs);
     // Accumulate the vector-jacobian products for each input
     for (int i = 0; i < argnums.size(); ++i) {
       auto in_id = a.inputs()[argnums[i]].id();
@@ -414,6 +363,9 @@ std::pair<std::vector<array>, std::vector<array>> jvp(
     const std::function<std::vector<array>(const std::vector<array>&)>& fun,
     const std::vector<array>& primals,
     const std::vector<array>& tangents) {
+  // Set the global tracing flag.
+  detail::InTracing in_tracing;
+
   if (primals.size() != tangents.size()) {
     throw std::invalid_argument(
         "[jvp] Number of inputs does not match number of tangents.");
@@ -448,36 +400,44 @@ std::pair<std::vector<array>, std::vector<array>> jvp(
 
   std::function<void(array&)> recurse;
   recurse = [&](auto& a) {
-    auto id = a.id();
-    a.set_tracer(false);
-
     // Check if visited and add to cache if not
-    if (auto inserted = cache.insert(id); !inserted.second) {
+    if (auto inserted = cache.insert(a.id()); !inserted.second) {
       return;
     }
+    a.set_tracer(false);
+    for (auto s : a.siblings()) {
+      s.set_tracer(false);
+      cache.insert(s.id());
+    }
 
-    for (auto& input : a.editable_inputs()) {
+    for (auto input : a.inputs()) {
       recurse(input);
     }
 
     // Stop grad
-    if (a.has_primitive() && typeid(a.primitive()) == typeid(StopGradient)) {
-      return;
+    if (a.has_primitive()) {
+      if (auto& p = a.primitive(); typeid(p) == typeid(StopGradient)) {
+        return;
+      }
     }
 
     // Calculate gradient if any inputs require gradient
     for (auto& input : a.inputs()) {
       if (calc_grad.find(input.id()) != calc_grad.end()) {
         tape.push_back(a);
-        calc_grad.insert(id);
+        calc_grad.insert(a.id());
+        for (auto& s : a.siblings()) {
+          calc_grad.insert(s.id());
+        }
         break;
       }
     }
   };
 
-  for (auto& out : outputs) {
+  for (auto out : outputs) {
     recurse(out);
   }
+
   std::unordered_map<std::uintptr_t, array> tan_map;
   for (int i = 0; i < primals_.size(); ++i) {
     tan_map.insert({primals_[i].id(), tangents[i]});
@@ -494,8 +454,11 @@ std::pair<std::vector<array>, std::vector<array>> jvp(
       }
     }
 
-    auto jvp = a.primitive().jvp(a.inputs(), tangents, argnums);
-    tan_map.insert({a.id(), jvp});
+    auto jvps = a.primitive().jvp(a.inputs(), tangents, argnums);
+    auto outputs = a.outputs();
+    for (int i = 0; i < jvps.size(); ++i) {
+      tan_map.insert({outputs[i].id(), jvps[i]});
+    }
   }
 
   std::vector<array> jvps;
@@ -565,9 +528,8 @@ ValueAndGradFn value_and_grad(
     for (auto arg : args) {
       ginputs.push_back(inputs[arg]);
     }
-    // Set the incoming gradient as int32 so that it will be promoted to the
-    // appropriate floating point type op(int, floatXX) -> floatXX for most ops
-    auto [outputs, grads] = vjp(gfun, ginputs, {array(1)});
+    // Set the incoming gradient to int32, vjp will cast it to the output type
+    auto [outputs, grads] = vjp(gfun, ginputs, {array(1.0f)});
     return std::make_pair(outputs, grads);
   };
 }
@@ -578,14 +540,16 @@ std::pair<std::vector<array>, std::vector<array>> vmap_trace(
     const std::function<std::vector<array>(const std::vector<array>&)>& fun,
     const std::vector<array>& inputs,
     const std::vector<int>& in_axes) {
+  // Set the global tracing flag.
+  detail::InTracing in_tracing;
+
   if (in_axes.size() != inputs.size()) {
     throw std::invalid_argument(
         "[vmap] The number of in axes must match the number of inputs.");
   }
 
-  // Run the function on placeholder inputs
-  // to get the original graph
-  std::vector<array> s_inputs;
+  // Some error checking and get the vmap axis size
+  size_t vmap_ax_size;
   for (int i = 0; i < inputs.size(); ++i) {
     if (in_axes[i] != -1) {
       if (inputs[i].ndim() == 0) {
@@ -598,7 +562,26 @@ std::pair<std::vector<array>, std::vector<array>> vmap_trace(
             << inputs[i].ndim() << " dimensions.";
         throw std::invalid_argument(msg.str());
       }
+      vmap_ax_size = inputs[i].shape(in_axes[i]);
+    }
+  }
+  // Check that all vmapped axes have the same size
+  for (int i = 0; i < inputs.size(); ++i) {
+    if (in_axes[i] != -1) {
+      if (size_t in_ax = inputs[i].shape(in_axes[i]); vmap_ax_size != in_ax) {
+        std::ostringstream msg;
+        msg << "[vmap] Inconsistent axis sizes: " << in_ax << " and "
+            << vmap_ax_size << ".";
+        throw std::invalid_argument(msg.str());
+      }
+    }
+  }
 
+  // Run the function on placeholder inputs
+  // to get the original graph
+  std::vector<array> s_inputs;
+  for (int i = 0; i < inputs.size(); ++i) {
+    if (in_axes[i] != -1) {
       std::vector<int> shape = inputs[i].shape();
       shape.erase(shape.begin() + in_axes[i]);
       array in(shape, inputs[i].dtype(), nullptr, {});
@@ -624,48 +607,56 @@ std::vector<array> vmap_replace(
 
   std::unordered_map<std::uintptr_t, std::pair<array, int>> tmap;
   std::unordered_set<std::uintptr_t> needs_vmap;
-  for (int i = 0; i < s_inputs.size(); ++i) {
-    if (in_axes[i] != -1) {
-      tmap.insert({s_inputs[i].id(), {inputs[i], in_axes[i]}});
-      needs_vmap.insert(s_inputs[i].id());
-    }
-  }
-
-  // Topologically sort the graph
   std::unordered_set<std::uintptr_t> cache;
   for (int i = 0; i < s_inputs.size(); ++i) {
     auto in = s_inputs[i];
     if (in_axes[i] != -1) {
+      tmap.insert({in.id(), {inputs[i], in_axes[i]}});
+      needs_vmap.insert(in.id());
       in.set_tracer(false);
     }
     cache.insert(in.id());
   }
+
+  // Topologically sort the graph
   std::vector<array> tape;
 
   std::function<void(const array&)> recurse;
 
   recurse = [&](const array& a) {
-    // Stop at inputs to the vmap function
     auto id = a.id();
     if (cache.find(id) != cache.end()) {
       return;
     }
+    cache.insert(id);
+    for (auto& s : a.siblings()) {
+      cache.insert(s.id());
+    }
+
+    // Recurse on inputs
     for (auto& input : a.inputs()) {
       recurse(input);
     }
-    cache.insert(id);
+    // If any input needs a vmap, then the outputs also need
+    // a vmap
     for (auto& input : a.inputs()) {
       if (needs_vmap.find(input.id()) != needs_vmap.end()) {
-        needs_vmap.insert(id);
         tape.push_back(a);
         tape.back().set_tracer(false);
+        needs_vmap.insert(a.id());
+        for (auto s : a.siblings()) {
+          needs_vmap.insert(s.id());
+          s.set_tracer(false);
+        }
         break;
       }
     }
   };
 
   for (auto& out : s_outputs) {
-    recurse(out);
+    if (out.has_primitive()) {
+      recurse(out);
+    }
   }
 
   // Transform each primitive in the graph with
@@ -683,16 +674,19 @@ std::vector<array> vmap_replace(
         v_axes.push_back(-1);
       }
     }
-    auto out_and_axis = a.primitive().vmap(v_inputs, v_axes);
-    tmap.insert({a.id(), out_and_axis});
+    auto [v_outputs, v_out_axes] = a.primitive().vmap(v_inputs, v_axes);
+    // For each primitive's outputs add its id, the vout id and the vax
+    auto outputs = a.outputs();
+    for (int i = 0; i < v_outputs.size(); ++i) {
+      tmap.insert({outputs[i].id(), {v_outputs[i], v_out_axes[i]}});
+    }
   }
 
   // Populate the outputs and make sure all the output axes are
   // in the right place
   std::vector<array> outputs;
   for (int i = 0; i < s_outputs.size(); ++i) {
-    auto map_it = tmap.find(s_outputs[i].id());
-    if (map_it != tmap.end()) {
+    if (auto map_it = tmap.find(s_outputs[i].id()); map_it != tmap.end()) {
       auto& [out, vdim] = map_it->second;
       if (vdim != out_axes[i]) {
         if (out_axes[i] >= out.ndim()) {
@@ -701,11 +695,7 @@ std::vector<array> vmap_replace(
               << out.ndim() << " dimensions.";
           throw std::invalid_argument(msg.str());
         }
-        std::vector<int> reorder(out.ndim());
-        std::iota(reorder.begin(), reorder.end(), 0);
-        reorder.erase(reorder.begin() + vdim);
-        reorder.insert(reorder.begin() + out_axes[i], vdim);
-        out = transpose(out, reorder);
+        out = moveaxis(out, vdim, out_axes[i]);
       }
       outputs.push_back(out);
     } else {
@@ -775,6 +765,60 @@ std::function<array(const array&)> vmap(
       {in_axis},
       {out_axis});
   return [vfun](const array& a) { return vfun({a})[0]; };
+}
+
+std::function<std::vector<array>(const std::vector<array>&)> custom_vjp(
+    std::function<std::vector<array>(const std::vector<array>&)> fun,
+    std::function<std::vector<array>(
+        const std::vector<array>&,
+        const std::vector<array>&,
+        const std::vector<array>&)> fun_vjp) {
+  return [fun = std::move(fun),
+          fun_vjp = std::move(fun_vjp)](const std::vector<array>& args) {
+    // Compute the outputs
+    auto outputs = fun(args);
+    for (auto& out : outputs) {
+      out = stop_gradient(out);
+    }
+
+    // Prepare the inputs to the primitive
+    // We also add the outputs to the primitive so that it can "run" the forward
+    // pass.
+    std::vector<array> inputs = args;
+    inputs.insert(inputs.end(), outputs.begin(), outputs.end());
+
+    // Compute the stream. Maybe do it in a smarter way at some point in the
+    // future.
+    Stream s = (outputs[0].has_primitive()) ? outputs[0].primitive().stream()
+                                            : default_stream(default_device());
+
+    // Make the output info
+    std::vector<std::vector<int>> shapes;
+    std::vector<Dtype> dtypes;
+    for (const auto& out : outputs) {
+      shapes.emplace_back(out.shape());
+      dtypes.emplace_back(out.dtype());
+    }
+
+    return array::make_arrays(
+        shapes,
+        dtypes,
+        std::make_shared<CustomVJP>(to_stream(s), fun_vjp),
+        inputs);
+  };
+}
+
+std::function<std::vector<array>(const std::vector<array>&)> checkpoint(
+    std::function<std::vector<array>(const std::vector<array>&)> fun) {
+  auto vjp_fun = [fun](
+                     const std::vector<array>& primals,
+                     const std::vector<array>& cotangents,
+                     const std::vector<array>& outputs) -> std::vector<array> {
+    auto [__, vjps] = vjp(fun, depends(primals, outputs), cotangents);
+    return vjps;
+  };
+
+  return custom_vjp(fun, vjp_fun);
 }
 
 } // namespace mlx::core

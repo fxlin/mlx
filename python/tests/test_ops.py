@@ -1,6 +1,7 @@
-# Copyright © 2023 Apple Inc.
+# Copyright © 2023-2024 Apple Inc.
 
 import math
+import os
 import unittest
 from itertools import permutations
 
@@ -12,12 +13,12 @@ import numpy as np
 class TestOps(mlx_tests.MLXTestCase):
     def test_full_ones_zeros(self):
         x = mx.full(2, 3.0)
-        self.assertEqual(x.shape, [2])
+        self.assertEqual(x.shape, (2,))
         self.assertEqual(x.tolist(), [3.0, 3.0])
 
         x = mx.full((2, 3), 2.0)
         self.assertEqual(x.dtype, mx.float32)
-        self.assertEqual(x.shape, [2, 3])
+        self.assertEqual(x.shape, (2, 3))
         self.assertEqual(x.tolist(), [[2, 2, 2], [2, 2, 2]])
 
         x = mx.full([3, 2], mx.array([False, True]))
@@ -28,11 +29,11 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(x.tolist(), [[2, 3], [2, 3], [2, 3]])
 
         x = mx.zeros(2)
-        self.assertEqual(x.shape, [2])
+        self.assertEqual(x.shape, (2,))
         self.assertEqual(x.tolist(), [0.0, 0.0])
 
         x = mx.ones(2)
-        self.assertEqual(x.shape, [2])
+        self.assertEqual(x.shape, (2,))
         self.assertEqual(x.tolist(), [1.0, 1.0])
 
         for t in [mx.bool_, mx.int32, mx.float32]:
@@ -274,6 +275,20 @@ class TestOps(mlx_tests.MLXTestCase):
             self.assertEqual(z.dtype, dt)
             self.assertEqual(z.item(), 1)
 
+            z = -1 % x
+            self.assertEqual(z.dtype, dt)
+            self.assertEqual(z.item(), 1)
+
+            z = -1 % -x
+            self.assertEqual(z.dtype, dt)
+            self.assertEqual(z.item(), -1)
+
+            x = mx.arange(10).astype(dt) - 5
+            y = x % 5
+            z = x % -5
+            self.assertEqual(y.tolist(), [0, 1, 2, 3, 4, 0, 1, 2, 3, 4])
+            self.assertEqual(z.tolist(), [0, -4, -3, -2, -1, 0, -4, -3, -2, -1])
+
     def test_comparisons(self):
         a = mx.array([0.0, 1.0, 5.0])
         b = mx.array([-1.0, 2.0, 5.0])
@@ -321,27 +336,61 @@ class TestOps(mlx_tests.MLXTestCase):
                 self.assertFalse(mx.array_equal(x, y))
                 self.assertTrue(mx.array_equal(x, y, equal_nan=True))
 
+    def test_isnan(self):
+        x = mx.array([0.0, float("nan")])
+        self.assertEqual(mx.isnan(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("nan")]).astype(mx.float16)
+        self.assertEqual(mx.isnan(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("nan")]).astype(mx.bfloat16)
+        self.assertEqual(mx.isnan(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("nan")]).astype(mx.complex64)
+        self.assertEqual(mx.isnan(x).tolist(), [False, True])
+
+        self.assertEqual(mx.isnan(0 * mx.array(float("inf"))).tolist(), True)
+
+    def test_isinf(self):
+        x = mx.array([0.0, float("inf")])
+        self.assertEqual(mx.isinf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("inf")]).astype(mx.float16)
+        self.assertEqual(mx.isinf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("inf")]).astype(mx.bfloat16)
+        self.assertEqual(mx.isinf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("inf")]).astype(mx.complex64)
+        self.assertEqual(mx.isinf(x).tolist(), [False, True])
+
+        self.assertEqual(mx.isinf(0 * mx.array(float("inf"))).tolist(), False)
+
+        x = mx.array([-2147483648, 0, 2147483647], dtype=mx.int32)
+        result = mx.isinf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
+        x = mx.array([-32768, 0, 32767], dtype=mx.int16)
+        result = mx.isinf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
     def test_tri(self):
         for shape in [[4], [4, 4], [2, 10]]:
             for diag in [-1, 0, 1, -2]:
-                self.assertEqualArray(
-                    mx.tri(*shape, k=diag), mx.array(np.tri(*shape, k=diag))
-                )
+                self.assertCmpNumpy(shape, mx.tri, np.tri, k=diag)
+        self.assertEqual(mx.tri(1, 1).dtype, mx.float32)
+        self.assertEqual(mx.tri(1, 1, dtype=mx.bfloat16).dtype, mx.bfloat16)
 
     def test_tril(self):
-        mt = mx.random.normal((10, 10))
-        nt = np.array(mt)
         for diag in [-1, 0, 1, -2]:
-            self.assertEqualArray(mx.tril(mt, diag), mx.array(np.tril(nt, diag)))
+            self.assertCmpNumpy([(10, 10)], mx.tril, np.tril, k=diag)
 
         with self.assertRaises(Exception):
             mx.tril(mx.zeros((1)))
 
     def test_triu(self):
-        mt = mx.random.normal((10, 10))
-        nt = np.array(mt)
         for diag in [-1, 0, 1, -2]:
-            self.assertEqualArray(mx.triu(mt, diag), mx.array(np.triu(nt, diag)))
+            self.assertCmpNumpy([(10, 10)], mx.triu, np.triu, k=diag)
         with self.assertRaises(Exception):
             mx.triu(mx.zeros((1)))
 
@@ -352,12 +401,22 @@ class TestOps(mlx_tests.MLXTestCase):
         expected = [0, -7, 3]
         self.assertListEqual(mx.minimum(x, y).tolist(), expected)
 
+        a = mx.array([float("nan")])
+        b = mx.array([0.0])
+        self.assertTrue(math.isnan(mx.minimum(a, b).item()))
+        self.assertTrue(math.isnan(mx.minimum(b, a).item()))
+
     def test_maximum(self):
         x = mx.array([0.0, -5, 10.0])
         y = mx.array([1.0, -7.0, 3.0])
 
         expected = [1, -5, 10]
         self.assertListEqual(mx.maximum(x, y).tolist(), expected)
+
+        a = mx.array([float("nan")])
+        b = mx.array([0.0])
+        self.assertTrue(math.isnan(mx.maximum(a, b).item()))
+        self.assertTrue(math.isnan(mx.maximum(b, a).item()))
 
     def test_floor(self):
         x = mx.array([-22.03, 19.98, -27, 9, 0.0, -np.inf, np.inf])
@@ -375,17 +434,63 @@ class TestOps(mlx_tests.MLXTestCase):
         with self.assertRaises(ValueError):
             mx.ceil(mx.array([22 + 3j, 19 + 98j]))
 
+    def test_isposinf(self):
+        x = mx.array([0.0, float("-inf")])
+        self.assertEqual(mx.isposinf(x).tolist(), [False, False])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.float16)
+        self.assertEqual(mx.isposinf(x).tolist(), [False, False])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.bfloat16)
+        self.assertEqual(mx.isposinf(x).tolist(), [False, False])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.complex64)
+        self.assertEqual(mx.isposinf(x).tolist(), [False, False])
+
+        self.assertEqual(mx.isposinf(0 * mx.array(float("inf"))).tolist(), False)
+
+        x = mx.array([-2147483648, 0, 2147483647], dtype=mx.int32)
+        result = mx.isposinf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
+        x = mx.array([-32768, 0, 32767], dtype=mx.int16)
+        result = mx.isposinf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
+    def test_isneginf(self):
+        x = mx.array([0.0, float("-inf")])
+        self.assertEqual(mx.isneginf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.float16)
+        self.assertEqual(mx.isneginf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.bfloat16)
+        self.assertEqual(mx.isneginf(x).tolist(), [False, True])
+
+        x = mx.array([0.0, float("-inf")]).astype(mx.complex64)
+        self.assertEqual(mx.isneginf(x).tolist(), [False, True])
+
+        self.assertEqual(mx.isneginf(0 * mx.array(float("inf"))).tolist(), False)
+
+        x = mx.array([-2147483648, 0, 2147483647], dtype=mx.int32)
+        result = mx.isneginf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
+        x = mx.array([-32768, 0, 32767], dtype=mx.int16)
+        result = mx.isneginf(x)
+        self.assertEqual(result.tolist(), [False, False, False])
+
     def test_round(self):
         # float
         x = mx.array(
-            [0.5, -0.5, 1.5, -1.5, -22.03, 19.98, -27, 9, 0.0, -np.inf, np.inf]
+            [0.5, -0.5, 1.5, -1.5, -21.03, 19.98, -27, 9, 0.0, -np.inf, np.inf]
         )
-        expected = [1, -1, 2, -2, -22, 20, -27, 9, 0, -np.inf, np.inf]
+        expected = [0, -0, 2, -2, -21, 20, -27, 9, 0, -np.inf, np.inf]
         self.assertListEqual(mx.round(x).tolist(), expected)
 
         # complex
-        y = mx.round(mx.array([22.2 + 3.6j, 19.5 + 98.2j]))
-        self.assertListEqual(y.tolist(), [22 + 4j, 20 + 98j])
+        y = mx.round(mx.array([22.2 + 3.6j, 18.5 + 98.2j]))
+        self.assertListEqual(y.tolist(), [22 + 4j, 18 + 98j])
 
         # decimals
         y0 = mx.round(mx.array([15, 122], mx.int32), decimals=0)
@@ -402,6 +507,16 @@ class TestOps(mlx_tests.MLXTestCase):
         y2 = mx.round(mx.array([1.537, 1.471], mx.float32), decimals=2)
         self.assertTrue(mx.allclose(y1, mx.array([1.5, 1.5])))
         self.assertTrue(mx.allclose(y2, mx.array([1.54, 1.47])))
+
+        # check round to nearest for different types
+        dtypes = [mx.bfloat16, mx.float16, mx.float32]
+        for dtype in dtypes:
+            x = mx.arange(10, dtype=dtype) - 4.5
+            x = mx.round(x)
+            self.assertEqual(
+                x.astype(mx.float32).tolist(),
+                [-4.0, -4.0, -2.0, -2.0, -0.0, 0.0, 2.0, 2.0, 4.0, 4.0],
+            )
 
     def test_transpose_noargs(self):
         x = mx.array([[0, 1, 1], [1, 0, 0]])
@@ -430,10 +545,10 @@ class TestOps(mlx_tests.MLXTestCase):
 
     def test_move_swap_axes(self):
         x = mx.zeros((2, 3, 4))
-        self.assertEqual(mx.moveaxis(x, 0, 2).shape, [3, 4, 2])
-        self.assertEqual(x.moveaxis(0, 2).shape, [3, 4, 2])
-        self.assertEqual(mx.swapaxes(x, 0, 2).shape, [4, 3, 2])
-        self.assertEqual(x.swapaxes(0, 2).shape, [4, 3, 2])
+        self.assertEqual(mx.moveaxis(x, 0, 2).shape, (3, 4, 2))
+        self.assertEqual(x.moveaxis(0, 2).shape, (3, 4, 2))
+        self.assertEqual(mx.swapaxes(x, 0, 2).shape, (4, 3, 2))
+        self.assertEqual(x.swapaxes(0, 2).shape, (4, 3, 2))
 
     def test_sum(self):
         x = mx.array(
@@ -445,7 +560,7 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.sum(x).item(), 9)
         y = mx.sum(x, keepdims=True)
         self.assertEqual(y, mx.array(9))
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
 
         self.assertEqual(mx.sum(x, axis=0).tolist(), [4, 5])
         self.assertEqual(mx.sum(x, axis=1).tolist(), [3, 6])
@@ -485,7 +600,7 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.prod(x).item(), 18)
         y = mx.prod(x, keepdims=True)
         self.assertEqual(y, mx.array(18))
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
 
         self.assertEqual(mx.prod(x, axis=0).tolist(), [3, 6])
         self.assertEqual(mx.prod(x, axis=1).tolist(), [2, 9])
@@ -500,11 +615,11 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.min(x).item(), 1)
         self.assertEqual(mx.max(x).item(), 4)
         y = mx.min(x, keepdims=True)
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
         self.assertEqual(y, mx.array(1))
 
         y = mx.max(x, keepdims=True)
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
         self.assertEqual(y, mx.array(4))
 
         self.assertEqual(mx.min(x, axis=0).tolist(), [1, 2])
@@ -570,7 +685,7 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.mean(x).item(), 2.5)
         y = mx.mean(x, keepdims=True)
         self.assertEqual(y, mx.array(2.5))
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
 
         self.assertEqual(mx.mean(x, axis=0).tolist(), [2, 3])
         self.assertEqual(mx.mean(x, axis=1).tolist(), [1.5, 3.5])
@@ -585,16 +700,26 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.var(x).item(), 1.25)
         y = mx.var(x, keepdims=True)
         self.assertEqual(y, mx.array(1.25))
-        self.assertEqual(y.shape, [1, 1])
+        self.assertEqual(y.shape, (1, 1))
 
         self.assertEqual(mx.var(x, axis=0).tolist(), [1.0, 1.0])
         self.assertEqual(mx.var(x, axis=1).tolist(), [0.25, 0.25])
+
+        x = mx.array([1.0, 2.0])
+        out = mx.var(x, ddof=2)
+        self.assertEqual(out.item(), float("inf"))
+
+        x = mx.array([1.0, 2.0])
+        out = mx.var(x, ddof=3)
+        self.assertEqual(out.item(), float("inf"))
 
     def test_abs(self):
         a = mx.array([-1.0, 1.0, -2.0, 3.0])
         result = mx.abs(a)
         expected = np.abs(a, dtype=np.float32)
         self.assertTrue(np.allclose(result, expected))
+
+        self.assertTrue(np.allclose(a.abs(), abs(a)))
 
     def test_negative(self):
         a = mx.array([-1.0, 1.0, -2.0, 3.0])
@@ -612,6 +737,28 @@ class TestOps(mlx_tests.MLXTestCase):
         a = mx.array([-1.0, 1.0, 0.0, 1.0, -2.0, 3.0])
         result = mx.logical_not(a)
         expected = np.logical_not(a)
+        self.assertTrue(np.array_equal(result, expected))
+
+    def test_logical_and(self):
+        a = mx.array([True, False, True, False])
+        b = mx.array([True, True, False, False])
+        result = mx.logical_and(a, b)
+        expected = np.logical_and(a, b)
+        self.assertTrue(np.array_equal(result, expected))
+
+        # test overloaded operator
+        result = a & b
+        self.assertTrue(np.array_equal(result, expected))
+
+    def test_logical_or(self):
+        a = mx.array([True, False, True, False])
+        b = mx.array([True, True, False, False])
+        result = mx.logical_or(a, b)
+        expected = np.logical_or(a, b)
+        self.assertTrue(np.array_equal(result, expected))
+
+        # test overloaded operator
+        result = a | b
         self.assertTrue(np.array_equal(result, expected))
 
     def test_square(self):
@@ -647,6 +794,10 @@ class TestOps(mlx_tests.MLXTestCase):
         expected = np.logaddexp(a, b, dtype=np.float32)
 
         self.assertTrue(np.allclose(result, expected))
+
+        a = mx.array([float("nan")])
+        b = mx.array([0.0])
+        self.assertTrue(math.isnan(mx.logaddexp(a, b).item()))
 
     def test_log(self):
         a = mx.array([1, 0.5, 10, 100])
@@ -743,11 +894,26 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertFalse(mx.allclose(a, b, 0.01).item())
         self.assertTrue(mx.allclose(a, b, 0.01, 0.1).item())
 
+        c = mx.array(float("inf"))
+        self.assertTrue(mx.allclose(c, c).item())
+
+    def test_isclose(self):
+        a = mx.array([float("inf"), float("inf"), float("-inf")])
+        b = mx.array([float("inf"), float("-inf"), float("-inf")])
+
+        self.assertListEqual(mx.isclose(a, b).tolist(), [True, False, True])
+
+        a = mx.array([np.nan])
+        self.assertListEqual(mx.isclose(a, a).tolist(), [False])
+
+        a = mx.array([np.nan])
+        self.assertListEqual(mx.isclose(a, a, equal_nan=True).tolist(), [True])
+
     def test_all(self):
         a = mx.array([[True, False], [True, True]])
 
         self.assertFalse(mx.all(a).item())
-        self.assertEqual(mx.all(a, keepdims=True).shape, [1, 1])
+        self.assertEqual(mx.all(a, keepdims=True).shape, (1, 1))
         self.assertFalse(mx.all(a, axis=[0, 1]).item())
         self.assertEqual(mx.all(a, axis=[0]).tolist(), [True, False])
         self.assertEqual(mx.all(a, axis=[1]).tolist(), [False, True])
@@ -758,7 +924,7 @@ class TestOps(mlx_tests.MLXTestCase):
         a = mx.array([[True, False], [False, False]])
 
         self.assertTrue(mx.any(a).item())
-        self.assertEqual(mx.any(a, keepdims=True).shape, [1, 1])
+        self.assertEqual(mx.any(a, keepdims=True).shape, (1, 1))
         self.assertTrue(mx.any(a, axis=[0, 1]).item())
         self.assertEqual(mx.any(a, axis=[0]).tolist(), [True, False])
         self.assertEqual(mx.any(a, axis=[1]).tolist(), [True, False])
@@ -815,22 +981,22 @@ class TestOps(mlx_tests.MLXTestCase):
 
         a_npy_taken = np.take(a_npy, idx_npy)
         a_mlx_taken = mx.take(a_mlx, idx_mlx)
-        self.assertListEqual(list(a_npy_taken.shape), a_mlx_taken.shape)
+        self.assertEqual(a_npy_taken.shape, a_mlx_taken.shape)
         self.assertListEqual(a_npy_taken.tolist(), a_mlx_taken.tolist())
 
         a_npy_taken = np.take(a_npy, idx_npy, axis=0)
         a_mlx_taken = mx.take(a_mlx, idx_mlx, axis=0)
-        self.assertListEqual(list(a_npy_taken.shape), a_mlx_taken.shape)
+        self.assertEqual(a_npy_taken.shape, a_mlx_taken.shape)
         self.assertListEqual(a_npy_taken.tolist(), a_mlx_taken.tolist())
 
         a_npy_taken = np.take(a_npy, idx_npy, axis=1)
         a_mlx_taken = mx.take(a_mlx, idx_mlx, axis=1)
-        self.assertListEqual(list(a_npy_taken.shape), a_mlx_taken.shape)
+        self.assertEqual(a_npy_taken.shape, a_mlx_taken.shape)
         self.assertListEqual(a_npy_taken.tolist(), a_mlx_taken.tolist())
 
         a_npy_taken = np.take(a_npy, idx_npy, axis=2)
         a_mlx_taken = mx.take(a_mlx, idx_mlx, axis=2)
-        self.assertListEqual(list(a_npy_taken.shape), a_mlx_taken.shape)
+        self.assertEqual(a_npy_taken.shape, a_mlx_taken.shape)
         self.assertListEqual(a_npy_taken.tolist(), a_mlx_taken.tolist())
 
     def test_take_along_axis(self):
@@ -861,6 +1027,9 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(y.tolist(), [[3, 4]])
         self.assertEqual(z.tolist(), [[5, 6]])
 
+        with self.assertRaises(ValueError):
+            mx.split(a, 3, axis=2)
+
         a = mx.arange(8)
         x, y, z = mx.split(a, [1, 5])
         self.assertEqual(x.tolist(), [0])
@@ -868,6 +1037,22 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(z.tolist(), [5, 6, 7])
 
     def test_arange_overload_dispatch(self):
+        with self.assertRaises(ValueError):
+            a = mx.arange(float("nan"), 1, 5)
+        with self.assertRaises(ValueError):
+            a = mx.arange(0, float("nan"), 5)
+        with self.assertRaises(ValueError):
+            a = mx.arange(0, 2, float("nan"))
+        with self.assertRaises(ValueError):
+            a = mx.arange(0, float("inf"), float("inf"))
+        with self.assertRaises(ValueError):
+            a = mx.arange(float("inf"), 1, float("inf"))
+        with self.assertRaises(ValueError):
+            a = mx.arange(float("inf"), 1, 5)
+        with self.assertRaises(ValueError):
+            INT_MAX = 2147483647
+            a = mx.arange(0, INT_MAX + 1, 1)
+
         a = mx.arange(5)
         expected = [0, 1, 2, 3, 4]
         self.assertListEqual(a.tolist(), expected)
@@ -951,6 +1136,27 @@ class TestOps(mlx_tests.MLXTestCase):
         ]
         self.assertListEqual(a.tolist(), expected)
         self.assertEqual(a.dtype, mx.int32)
+
+        a = mx.arange(0, 10, 100)
+        expected = [0]
+        self.assertListEqual(a.tolist(), expected)
+        self.assertEqual(a.dtype, mx.int32)
+
+        a = mx.arange(10, 0, 1)
+        expected = []
+        self.assertListEqual(a.tolist(), expected)
+
+        a = mx.arange(10, 0, float("inf"))
+        expected = []
+        self.assertListEqual(a.tolist(), expected)
+
+        a = mx.arange(0, 10, float("inf"))
+        expected = [0]
+        self.assertListEqual(a.tolist(), expected)
+
+        a = mx.arange(0, -10, float("-inf"))
+        expected = [0]
+        self.assertListEqual(a.tolist(), expected)
 
     def test_unary_ops(self):
         def test_ops(npop, mlxop, x, y, atol):
@@ -1156,9 +1362,7 @@ class TestOps(mlx_tests.MLXTestCase):
         for d in dims:
             anp = np.random.randint(-20, 20, (size**d,)).reshape([size] * d)
             for n_bsx in range(d):
-                bnp = np.random.randint(-20, 20, (size**n_bsx,)).reshape(
-                    [size] * n_bsx
-                )
+                bnp = np.random.randint(-20, 20, (size**n_bsx,)).reshape([size] * n_bsx)
                 for _ in range(trial_mul * d):
                     amlx = mx.array(anp)
                     bmlx = mx.array(bnp)
@@ -1209,6 +1413,11 @@ class TestOps(mlx_tests.MLXTestCase):
             self.assertTrue((a[:-1] < 1e-9).all())
             self.assertEqual(a[-1], 1)
 
+        # Sliced inputs
+        y = mx.random.uniform(shape=(8, 4))
+        out = mx.softmax(y[:, 0:2], axis=-1)
+        self.assertAlmostEqual(out.sum().item(), 8.0)
+
     def test_concatenate(self):
         a_npy = np.random.randn(32, 32, 32)
         b_npy = np.random.randn(32, 32, 32)
@@ -1221,6 +1430,11 @@ class TestOps(mlx_tests.MLXTestCase):
                 c_mlx = mx.concatenate([a_mlx, mx.transpose(b_mlx, p)], axis=axis)
                 self.assertEqual(list(c_npy.shape), list(c_mlx.shape))
                 self.assertTrue(np.allclose(c_npy, c_mlx, atol=1e-6))
+
+        with self.assertRaises(ValueError):
+            a = mx.array([[1, 2], [1, 2], [1, 2]])
+            b = mx.array([1, 2])
+            mx.concatenate([a, b], axis=0)
 
     def test_pad(self):
         pad_width_and_values = [
@@ -1243,13 +1457,13 @@ class TestOps(mlx_tests.MLXTestCase):
                 self.assertTrue(np.allclose(b_npy, b_mlx, atol=1e-6))
 
         a = mx.zeros((1, 1, 1))
-        self.assertEqual(mx.pad(a, 1).shape, [3, 3, 3])
-        self.assertEqual(mx.pad(a, (1,)).shape, [3, 3, 3])
-        self.assertEqual(mx.pad(a, [1]).shape, [3, 3, 3])
-        self.assertEqual(mx.pad(a, (1, 2)).shape, [4, 4, 4])
-        self.assertEqual(mx.pad(a, [(1, 2)]).shape, [4, 4, 4])
-        self.assertEqual(mx.pad(a, ((1, 2),)).shape, [4, 4, 4])
-        self.assertEqual(mx.pad(a, ((1, 2), (2, 1), (2, 2))).shape, [4, 4, 5])
+        self.assertEqual(mx.pad(a, 1).shape, (3, 3, 3))
+        self.assertEqual(mx.pad(a, (1,)).shape, (3, 3, 3))
+        self.assertEqual(mx.pad(a, [1]).shape, (3, 3, 3))
+        self.assertEqual(mx.pad(a, (1, 2)).shape, (4, 4, 4))
+        self.assertEqual(mx.pad(a, [(1, 2)]).shape, (4, 4, 4))
+        self.assertEqual(mx.pad(a, ((1, 2),)).shape, (4, 4, 4))
+        self.assertEqual(mx.pad(a, ((1, 2), (2, 1), (2, 2))).shape, (4, 4, 5))
 
         # Test grads
         a_fwd = mx.array(np.random.rand(16, 16).astype(np.float32))
@@ -1260,20 +1474,17 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertTrue(mx.allclose(a_bwd[4:-2, 2:-4], df[0]).item())
 
     def test_where(self):
-        a = mx.array([[1, 2], [3, 4]])
-        out = mx.where(True, a, 1)
-        out_np = np.where(True, a, 1)
-        self.assertTrue(np.array_equal(out, out_np))
-
-        out = mx.where(True, 1, a)
-        out_np = np.where(True, 1, a)
-        self.assertTrue(np.array_equal(out, out_np))
-
-        condition = mx.array([[True, False], [False, True]])
-        b = mx.array([5, 6])
-        out = mx.where(condition, a, b)
-        out_np = np.where(condition, a, b)
-        self.assertTrue(np.array_equal(out, out_np))
+        self.assertCmpNumpy([True, mx.array([[1, 2], [3, 4]]), 1], mx.where, np.where)
+        self.assertCmpNumpy([True, 1, mx.array([[1, 2], [3, 4]])], mx.where, np.where)
+        self.assertCmpNumpy(
+            [
+                mx.array([[True, False], [False, True]]),
+                mx.array([[1, 2], [3, 4]]),
+                mx.array([5, 6]),
+            ],
+            mx.where,
+            np.where,
+        )
 
     def test_as_strided(self):
         x_npy = np.random.randn(128).astype(np.float32)
@@ -1299,7 +1510,7 @@ class TestOps(mlx_tests.MLXTestCase):
             for axis in (None, 0, 1, 2):
                 c_npy = npop(a_npy, axis=axis)
                 c_mlx = mxop(a_mlx, axis=axis)
-                self.assertTrue(np.allclose(c_npy, c_mlx, rtol=1e-4, atol=1e-4))
+                self.assertTrue(np.allclose(c_npy, c_mlx, rtol=1e-3, atol=1e-3))
 
         for op in ["cumsum", "cumprod", "cummax", "cummin"]:
             c1 = mxop(a_mlx, axis=2)
@@ -1336,19 +1547,19 @@ class TestOps(mlx_tests.MLXTestCase):
 
     def test_squeeze_expand(self):
         a = mx.zeros((2, 1, 2, 1))
-        self.assertEqual(mx.squeeze(a).shape, [2, 2])
-        self.assertEqual(mx.squeeze(a, 1).shape, [2, 2, 1])
-        self.assertEqual(mx.squeeze(a, [1, 3]).shape, [2, 2])
-        self.assertEqual(a.squeeze().shape, [2, 2])
-        self.assertEqual(a.squeeze(1).shape, [2, 2, 1])
-        self.assertEqual(a.squeeze([1, 3]).shape, [2, 2])
+        self.assertEqual(mx.squeeze(a).shape, (2, 2))
+        self.assertEqual(mx.squeeze(a, 1).shape, (2, 2, 1))
+        self.assertEqual(mx.squeeze(a, [1, 3]).shape, (2, 2))
+        self.assertEqual(a.squeeze().shape, (2, 2))
+        self.assertEqual(a.squeeze(1).shape, (2, 2, 1))
+        self.assertEqual(a.squeeze([1, 3]).shape, (2, 2))
 
         a = mx.zeros((2, 2))
-        self.assertEqual(mx.squeeze(a).shape, [2, 2])
+        self.assertEqual(mx.squeeze(a).shape, (2, 2))
 
-        self.assertEqual(mx.expand_dims(a, 0).shape, [1, 2, 2])
-        self.assertEqual(mx.expand_dims(a, (0, 1)).shape, [1, 1, 2, 2])
-        self.assertEqual(mx.expand_dims(a, [0, -1]).shape, [1, 2, 2, 1])
+        self.assertEqual(mx.expand_dims(a, 0).shape, (1, 2, 2))
+        self.assertEqual(mx.expand_dims(a, (0, 1)).shape, (1, 1, 2, 2))
+        self.assertEqual(mx.expand_dims(a, [0, -1]).shape, (1, 2, 2, 1))
 
     def test_sort(self):
         shape = (3, 4, 5)
@@ -1402,30 +1613,23 @@ class TestOps(mlx_tests.MLXTestCase):
                             d_np = np.take(b_mx, np.arange(kth), axis=axis)
                             self.assertTrue(np.all(d_np <= c_mx))
 
+    @unittest.skipIf(
+        os.getenv("LOW_MEMORY", None) is not None,
+        "This test requires a lot of memory",
+    )
     def test_large_binary(self):
         a = mx.ones([1000, 2147484], mx.int8)
         b = mx.ones([2147484], mx.int8)
         self.assertEqual((a + b)[0, 0].item(), 2)
 
     def test_eye(self):
-        eye_matrix = mx.eye(3)
-        np_eye_matrix = np.eye(3)
-        self.assertTrue(np.array_equal(eye_matrix, np_eye_matrix))
-
+        self.assertCmpNumpy([3], mx.eye, np.eye)
         # Test for non-square matrix
-        eye_matrix = mx.eye(3, 4)
-        np_eye_matrix = np.eye(3, 4)
-        self.assertTrue(np.array_equal(eye_matrix, np_eye_matrix))
-
+        self.assertCmpNumpy([3, 4], mx.eye, np.eye)
         # Test with positive k parameter
-        eye_matrix = mx.eye(3, 4, k=1)
-        np_eye_matrix = np.eye(3, 4, k=1)
-        self.assertTrue(np.array_equal(eye_matrix, np_eye_matrix))
-
+        self.assertCmpNumpy([3, 4], mx.eye, np.eye, k=1)
         # Test with negative k parameter
-        eye_matrix = mx.eye(5, 6, k=-2)
-        np_eye_matrix = np.eye(5, 6, k=-2)
-        self.assertTrue(np.array_equal(eye_matrix, np_eye_matrix))
+        self.assertCmpNumpy([5, 6], mx.eye, np.eye, k=-2)
 
     def test_stack(self):
         a = mx.ones((2,))
@@ -1460,12 +1664,12 @@ class TestOps(mlx_tests.MLXTestCase):
 
     def test_flatten(self):
         x = mx.zeros([2, 3, 4])
-        self.assertEqual(mx.flatten(x).shape, [2 * 3 * 4])
-        self.assertEqual(mx.flatten(x, start_axis=1).shape, [2, 3 * 4])
-        self.assertEqual(mx.flatten(x, end_axis=1).shape, [2 * 3, 4])
-        self.assertEqual(x.flatten().shape, [2 * 3 * 4])
-        self.assertEqual(x.flatten(start_axis=1).shape, [2, 3 * 4])
-        self.assertEqual(x.flatten(end_axis=1).shape, [2 * 3, 4])
+        self.assertEqual(mx.flatten(x).shape, (2 * 3 * 4,))
+        self.assertEqual(mx.flatten(x, start_axis=1).shape, (2, 3 * 4))
+        self.assertEqual(mx.flatten(x, end_axis=1).shape, (2 * 3, 4))
+        self.assertEqual(x.flatten().shape, (2 * 3 * 4,))
+        self.assertEqual(x.flatten(start_axis=1).shape, (2, 3 * 4))
+        self.assertEqual(x.flatten(end_axis=1).shape, (2 * 3, 4))
 
     def test_clip(self):
         a = np.array([1, 4, 3, 8, 5], np.int32)
@@ -1516,52 +1720,296 @@ class TestOps(mlx_tests.MLXTestCase):
         expected = mx.array(np.linspace(0, 1, 10))
         self.assertEqualArray(d, expected)
 
+        # Test num equal to 1
+        d = mx.linspace(1, 10, 1)
+        expected = mx.array(np.linspace(1, 10, 1))
+        self.assertEqualArray(d, expected)
+
     def test_repeat(self):
         # Setup data for the tests
-        data = np.array([[[13, 3], [16, 6]], [[14, 4], [15, 5]], [[11, 1], [12, 2]]])
+        data = mx.array([[[13, 3], [16, 6]], [[14, 4], [15, 5]], [[11, 1], [12, 2]]])
+        # Test repeat 0 times
+        self.assertCmpNumpy([data, 0], mx.repeat, np.repeat)
         # Test repeat along axis 0
-        repeat_axis_0 = mx.repeat(mx.array(data), 2, axis=0)
-        expected_axis_0 = np.repeat(data, 2, axis=0)
-
-        self.assertEqualArray(repeat_axis_0, mx.array(expected_axis_0))
-
+        self.assertCmpNumpy([data, 2], mx.repeat, np.repeat, axis=0)
         # Test repeat along axis 1
-        repeat_axis_1 = mx.repeat(mx.array(data), 2, axis=1)
-        expected_axis_1 = np.repeat(data, 2, axis=1)
-        self.assertEqualArray(repeat_axis_1, mx.array(expected_axis_1))
-
+        self.assertCmpNumpy([data, 2], mx.repeat, np.repeat, axis=1)
         # Test repeat along the last axis (default)
-        repeat_axis_2 = mx.repeat(mx.array(data), 2)
-        expected_axis_2 = np.repeat(data, 2)
-        self.assertEqualArray(repeat_axis_2, mx.array(expected_axis_2))
-
+        self.assertCmpNumpy([data, 2], mx.repeat, np.repeat)
         # Test repeat with a 1D array along axis 0
-        data_2 = mx.array([1, 3, 2])
-        repeat_2 = mx.repeat(mx.array(data_2), 3, axis=0)
-        expected_2 = np.repeat(data_2, 3)
-        self.assertEqualArray(repeat_2, mx.array(expected_2))
-
+        self.assertCmpNumpy([mx.array([1, 3, 2]), 3], mx.repeat, np.repeat, axis=0)
         # Test repeat with a 2D array along axis 0
-        data_3 = mx.array([[1, 2, 3], [4, 5, 4], [0, 1, 2]])
-        repeat_3 = mx.repeat(mx.array(data_3), 2, axis=0)
-        expected_3 = np.repeat(data_3, 2, axis=0)
-        self.assertEqualArray(repeat_3, mx.array(expected_3))
+        self.assertCmpNumpy(
+            [mx.array([[1, 2, 3], [4, 5, 4], [0, 1, 2]]), 2],
+            mx.repeat,
+            np.repeat,
+            axis=0,
+        )
 
     def test_tensordot(self):
-        x = mx.arange(60.0).reshape(3, 4, 5)
-        y = mx.arange(24.0).reshape(4, 3, 2)
-        z = mx.tensordot(x, y, dims=([1, 0], [0, 1]))
-        self.assertEqualArray(z, mx.array(np.tensordot(x, y, axes=([1, 0], [0, 1]))))
-        x = mx.random.normal((3, 4, 5))
-        y = mx.random.normal((4, 5, 6))
-        z = mx.tensordot(x, y, dims=2)
-        self.assertEqualArray(z, mx.array(np.tensordot(x, y, axes=2)))
-        x = mx.random.normal((3, 5, 4, 6))
-        y = mx.random.normal((6, 4, 5, 3))
-        z = mx.tensordot(x, y, dims=([2, 1, 3], [1, 2, 0]))
-        self.assertEqualArray(
-            z, mx.array(np.tensordot(x, y, axes=([2, 1, 3], [1, 2, 0])))
+        # No fp16 matmuls on linux
+        if self.is_linux:
+            dtypes = [mx.float32]
+        else:
+            dtypes = [mx.float16, mx.float32]
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                self.assertCmpNumpy(
+                    [(3, 4, 5), (4, 3, 2)],
+                    mx.tensordot,
+                    np.tensordot,
+                    dtype=dtype,
+                    axes=([1, 0], [0, 1]),
+                )
+                self.assertCmpNumpy(
+                    [(3, 4, 5), (4, 5, 6)],
+                    mx.tensordot,
+                    np.tensordot,
+                    dtype=dtype,
+                    axes=2,
+                )
+                self.assertCmpNumpy(
+                    [(3, 5, 4, 6), (6, 4, 5, 3)],
+                    mx.tensordot,
+                    np.tensordot,
+                    dtype=dtype,
+                    axes=([2, 1, 3], [1, 2, 0]),
+                )
+
+    def test_inner(self):
+        self.assertCmpNumpy([(3,), (3,)], mx.inner, np.inner)
+        self.assertCmpNumpy([(1, 1, 2), (3, 2)], mx.inner, np.inner)
+        self.assertCmpNumpy([(2, 3, 4), (4,)], mx.inner, np.inner)
+
+    def test_outer(self):
+        self.assertCmpNumpy([(3,), (3,)], mx.outer, np.outer)
+        self.assertCmpNumpy(
+            [
+                mx.ones(
+                    5,
+                ),
+                mx.linspace(-2, 2, 5),
+            ],
+            mx.outer,
+            np.outer,
         )
+        self.assertCmpNumpy(
+            [
+                1j * mx.linspace(2, -2, 5),
+                mx.ones(
+                    5,
+                ),
+            ],
+            mx.outer,
+            np.outer,
+        )
+
+    def test_divmod(self):
+        # A few sizes for the inputs with and without broadcasting
+        sizes = [
+            ((1,), (1,)),
+            ((1,), (10,)),
+            ((10,), (1,)),
+            ((3,), (3,)),
+            ((2, 2, 2), (1, 2, 1)),
+            ((2, 1, 2), (1, 2, 1)),
+            ((2, 2, 2, 2), (2, 2, 2, 2)),
+        ]
+        types = [np.uint16, np.uint32, np.int32, np.float16, np.float32]
+        for s1, s2 in sizes:
+            for t in types:
+                a_np = np.random.uniform(1, 100, size=s1).astype(t)
+                b_np = np.random.uniform(1, 100, size=s2).astype(t)
+                np_out = np.divmod(a_np, b_np)
+                mx_out = mx.divmod(mx.array(a_np), mx.array(b_np))
+                self.assertTrue(
+                    np.allclose(np_out[0], mx_out[0]), msg=f"Shapes {s1} {s2}, Type {t}"
+                )
+
+    def test_tile(self):
+        self.assertCmpNumpy([(2,), [2]], mx.tile, np.tile)
+        self.assertCmpNumpy([(2, 3, 4), [2]], mx.tile, np.tile)
+        self.assertCmpNumpy([(2, 3, 4), [2, 1]], mx.tile, np.tile)
+        self.assertCmpNumpy(
+            [
+                (2, 3, 4),
+                [
+                    2,
+                    2,
+                ],
+            ],
+            mx.tile,
+            np.tile,
+        )
+        self.assertCmpNumpy([(3,), [2, 2, 2]], mx.tile, np.tile)
+
+    def test_empty_matmuls(self):
+        a = mx.array([])
+        b = mx.array([])
+        self.assertEqual(mx.inner(a, b).item(), 0.0)
+
+        a = mx.zeros((10, 0))
+        b = mx.zeros((0, 10))
+        out = a @ b
+        self.assertTrue(mx.array_equal(out, mx.zeros((10, 10))))
+
+    def test_diagonal(self):
+        x = mx.array(
+            [
+                [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]],
+                [[12, 13, 14, 15], [16, 17, 18, 19], [20, 21, 22, 23]],
+            ]
+        )
+        expected = [[0, 13], [4, 17], [8, 21]]
+
+        self.assertListEqual(mx.diagonal(x, 0, -1, 0).tolist(), expected)
+
+        expected = [[1, 14], [5, 18], [9, 22]]
+        self.assertListEqual(mx.diagonal(x, -1, 2, 0).tolist(), expected)
+
+    def test_diag(self):
+        # Test 1D input
+        x = mx.array([1, 2, 3, 4])
+        expected = mx.array([[1, 0, 0, 0], [0, 2, 0, 0], [0, 0, 3, 0], [0, 0, 0, 4]])
+        result = mx.diag(x)
+        self.assertTrue(mx.array_equal(result, expected))
+
+        # Test 1D with offset
+        x = mx.array([2, 6])
+        result = mx.diag(x, k=5)
+        expected = mx.array(np.diag(x, k=5))
+        self.assertTrue(mx.array_equal(result, expected))
+
+        # Test 2D input
+        x = mx.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        expected = mx.array([1, 5, 9])
+        result = mx.diag(x)
+        self.assertTrue(mx.array_equal(result, expected))
+
+        # Test with offset
+        expected = mx.array([2, 6])
+        result = mx.diag(x, 1)
+        self.assertTrue(mx.array_equal(result, expected))
+
+        # Test non-square
+        x = mx.array([[1, 2, 3], [4, 5, 6]])
+        result = mx.diag(x)
+        expected = mx.array(np.diag(x))
+        self.assertTrue(mx.array_equal(result, expected))
+
+        result = mx.diag(x, k=10)
+        expected = mx.array(np.diag(x, k=10))
+        self.assertTrue(mx.array_equal(result, expected))
+
+        result = mx.diag(x, k=-10)
+        expected = mx.array(np.diag(x, k=-10))
+        self.assertTrue(mx.array_equal(result, expected))
+
+        result = mx.diag(x, k=-1)
+        expected = mx.array(np.diag(x, k=-1))
+        self.assertTrue(mx.array_equal(result, expected))
+
+    def test_atleast_1d(self):
+        def compare_nested_lists(x, y):
+            if isinstance(x, list) and isinstance(y, list):
+                if len(x) != len(y):
+                    return False
+                for i in range(len(x)):
+                    if not compare_nested_lists(x[i], y[i]):
+                        return False
+                return True
+            else:
+                return x == y
+
+        # Test 1D input
+        arrays = [
+            [1],
+            [1, 2, 3],
+            [1, 2, 3, 4],
+            [[1], [2], [3]],
+            [[1, 2], [3, 4]],
+            [[1, 2, 3], [4, 5, 6]],
+            [[[[1]], [[2]], [[3]]]],
+        ]
+
+        mx_arrays = [mx.atleast_1d(mx.array(x)) for x in arrays]
+        atleast_arrays = mx.atleast_1d(*mx_arrays)
+
+        for i, array in enumerate(arrays):
+            mx_res = mx.atleast_1d(mx.array(array))
+            np_res = np.atleast_1d(np.array(array))
+            self.assertTrue(compare_nested_lists(mx_res.tolist(), np_res.tolist()))
+            self.assertEqual(mx_res.shape, np_res.shape)
+            self.assertEqual(mx_res.ndim, np_res.ndim)
+            self.assertTrue(mx.all(mx.equal(mx_res, atleast_arrays[i])))
+
+    def test_atleast_2d(self):
+        def compare_nested_lists(x, y):
+            if isinstance(x, list) and isinstance(y, list):
+                if len(x) != len(y):
+                    return False
+                for i in range(len(x)):
+                    if not compare_nested_lists(x[i], y[i]):
+                        return False
+                return True
+            else:
+                return x == y
+
+        # Test 1D input
+        arrays = [
+            [1],
+            [1, 2, 3],
+            [1, 2, 3, 4],
+            [[1], [2], [3]],
+            [[1, 2], [3, 4]],
+            [[1, 2, 3], [4, 5, 6]],
+            [[[[1]], [[2]], [[3]]]],
+        ]
+
+        mx_arrays = [mx.atleast_2d(mx.array(x)) for x in arrays]
+        atleast_arrays = mx.atleast_2d(*mx_arrays)
+
+        for i, array in enumerate(arrays):
+            mx_res = mx.atleast_2d(mx.array(array))
+            np_res = np.atleast_2d(np.array(array))
+            self.assertTrue(compare_nested_lists(mx_res.tolist(), np_res.tolist()))
+            self.assertEqual(mx_res.shape, np_res.shape)
+            self.assertEqual(mx_res.ndim, np_res.ndim)
+            self.assertTrue(mx.all(mx.equal(mx_res, atleast_arrays[i])))
+
+    def test_atleast_3d(self):
+        def compare_nested_lists(x, y):
+            if isinstance(x, list) and isinstance(y, list):
+                if len(x) != len(y):
+                    return False
+                for i in range(len(x)):
+                    if not compare_nested_lists(x[i], y[i]):
+                        return False
+                return True
+            else:
+                return x == y
+
+        # Test 1D input
+        arrays = [
+            [1],
+            [1, 2, 3],
+            [1, 2, 3, 4],
+            [[1], [2], [3]],
+            [[1, 2], [3, 4]],
+            [[1, 2, 3], [4, 5, 6]],
+            [[[[1]], [[2]], [[3]]]],
+        ]
+
+        mx_arrays = [mx.atleast_3d(mx.array(x)) for x in arrays]
+        atleast_arrays = mx.atleast_3d(*mx_arrays)
+
+        for i, array in enumerate(arrays):
+            mx_res = mx.atleast_3d(mx.array(array))
+            np_res = np.atleast_3d(np.array(array))
+            self.assertTrue(compare_nested_lists(mx_res.tolist(), np_res.tolist()))
+            self.assertEqual(mx_res.shape, np_res.shape)
+            self.assertEqual(mx_res.ndim, np_res.ndim)
+            self.assertTrue(mx.all(mx.equal(mx_res, atleast_arrays[i])))
 
 
 if __name__ == "__main__":

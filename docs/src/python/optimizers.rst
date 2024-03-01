@@ -29,19 +29,8 @@ model's parameters and the **optimizer state**.
             # Compute the new parameters but also the optimizer state.
             mx.eval(model.parameters(), optimizer.state)
 
-.. currentmodule:: mlx.optimizers
+.. toctree::
 
-.. autosummary::
-   :toctree: _autosummary
-   :template: optimizers-template.rst
-
-   OptimizerState
-   Optimizer
-   SGD
-   RMSprop
-   Adagrad
-   AdaDelta
-   Adam
-   AdamW
-   Adamax
-   Lion
+   optimizers/optimizer
+   optimizers/common_optimizers
+   optimizers/schedulers

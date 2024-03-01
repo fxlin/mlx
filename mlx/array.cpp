@@ -1,4 +1,4 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #include <functional>
 
@@ -6,6 +6,7 @@
 #include "mlx/ops.h"
 #include "mlx/primitives.h"
 #include "mlx/transforms.h"
+#include "mlx/transforms_impl.h"
 
 namespace mlx::core {
 
@@ -21,6 +22,12 @@ std::pair<size_t, std::vector<size_t>> cum_prod(const std::vector<int>& shape) {
   return {cum_prod, strides};
 }
 
+/** Return true if we are currently performing a function transformation in
+ * order to keep the graph when evaluating tracer arrays. */
+bool in_tracing() {
+  return detail::InTracing::in_tracing();
+}
+
 } // namespace
 
 array::array(const std::complex<float>& val, Dtype dtype /* = complex64 */)
@@ -32,7 +39,7 @@ array::array(const std::complex<float>& val, Dtype dtype /* = complex64 */)
 array::array(
     const std::vector<int>& shape,
     Dtype dtype,
-    std::unique_ptr<Primitive> primitive,
+    std::shared_ptr<Primitive> primitive,
     const std::vector<array>& inputs)
     : array_desc_(std::make_shared<ArrayDesc>(
           shape,
@@ -40,10 +47,45 @@ array::array(
           std::move(primitive),
           inputs)) {}
 
+array::array(
+    std::vector<int> shape,
+    Dtype dtype,
+    std::shared_ptr<Primitive> primitive,
+    std::vector<array>&& inputs)
+    : array_desc_(std::make_shared<ArrayDesc>(
+          std::move(shape),
+          dtype,
+          std::move(primitive),
+          std::move(inputs))) {}
+
+std::vector<array> array::make_arrays(
+    const std::vector<std::vector<int>>& shapes,
+    const std::vector<Dtype>& dtypes,
+    std::shared_ptr<Primitive> primitive,
+    const std::vector<array>& inputs) {
+  std::vector<array> outputs;
+  for (int i = 0; i < shapes.size(); ++i) {
+    outputs.push_back(array(shapes[i], dtypes[i], primitive, inputs));
+  }
+  for (int i = 0; i < outputs.size(); ++i) {
+    auto siblings = outputs;
+    siblings.erase(siblings.begin() + i);
+    outputs[i].set_siblings(std::move(siblings), i);
+  }
+  return outputs;
+}
+
 array::array(std::initializer_list<float> data)
     : array_desc_(std::make_shared<ArrayDesc>(
           std::vector<int>{static_cast<int>(data.size())},
           float32)) {
+  init(data.begin());
+}
+
+array::array(std::initializer_list<int> data, Dtype dtype)
+    : array_desc_(std::make_shared<ArrayDesc>(
+          std::vector<int>{static_cast<int>(data.size())},
+          dtype)) {
   init(data.begin());
 }
 
@@ -58,12 +100,26 @@ array::array(
 }
 
 void array::detach() {
+  for (auto& s : array_desc_->siblings) {
+    s.array_desc_->inputs.clear();
+    s.array_desc_->siblings.clear();
+    s.array_desc_->position = 0;
+    s.array_desc_->depth = 0;
+    s.array_desc_->primitive = nullptr;
+  }
   array_desc_->inputs.clear();
+  array_desc_->siblings.clear();
+  array_desc_->position = 0;
+  array_desc_->depth = 0;
   array_desc_->primitive = nullptr;
 }
 
-void array::eval(bool retain_graph /* = false */) {
-  mlx::core::eval({*this}, retain_graph);
+void array::eval() {
+  mlx::core::eval({*this});
+}
+
+bool array::is_tracer() const {
+  return array_desc_->is_tracer && in_tracing();
 }
 
 void array::set_data(allocator::Buffer buffer, deleter_t d) {
@@ -108,6 +164,14 @@ void array::copy_shared_buffer(const array& other) {
   copy_shared_buffer(other, other.strides(), other.flags(), other.data_size());
 }
 
+void array::move_shared_buffer(array other) {
+  array_desc_->data = std::move(other.array_desc_->data);
+  array_desc_->strides = other.strides();
+  array_desc_->flags = other.flags();
+  array_desc_->data_size = other.data_size();
+  array_desc_->data_ptr = other.array_desc_->data_ptr;
+}
+
 array::ArrayDesc::ArrayDesc(const std::vector<int>& shape, Dtype dtype)
     : shape(shape), dtype(dtype) {
   std::tie(size, strides) = cum_prod(shape);
@@ -116,21 +180,43 @@ array::ArrayDesc::ArrayDesc(const std::vector<int>& shape, Dtype dtype)
 array::ArrayDesc::ArrayDesc(
     const std::vector<int>& shape,
     Dtype dtype,
-    std::unique_ptr<Primitive> primitive,
+    std::shared_ptr<Primitive> primitive,
     const std::vector<array>& inputs)
     : shape(shape),
       dtype(dtype),
       primitive(std::move(primitive)),
       inputs(inputs) {
-  std::tie(size, strides) = cum_prod(shape);
-  for (auto& in : inputs) {
+  std::tie(size, strides) = cum_prod(this->shape);
+  for (auto& in : this->inputs) {
     is_tracer |= in.is_tracer();
+    depth = std::max(in.graph_depth(), depth);
   }
+  depth++;
 }
 
-// Needed because the Primitive type used in array.h is incomplete and the
-// compiler needs to see the call to the destructor after the type is complete.
-array::ArrayDesc::~ArrayDesc() = default;
+array::ArrayDesc::ArrayDesc(
+    std::vector<int>&& shape,
+    Dtype dtype,
+    std::shared_ptr<Primitive> primitive,
+    std::vector<array>&& inputs)
+    : shape(std::move(shape)),
+      dtype(dtype),
+      primitive(std::move(primitive)),
+      inputs(std::move(inputs)) {
+  std::tie(size, strides) = cum_prod(this->shape);
+  for (auto& in : this->inputs) {
+    is_tracer |= in.is_tracer();
+    depth = std::max(in.graph_depth(), depth);
+  }
+  depth++;
+}
+
+array::ArrayIterator::ArrayIterator(const array& arr, int idx)
+    : arr(arr), idx(idx) {
+  if (arr.ndim() == 0) {
+    throw std::invalid_argument("Cannot iterate over 0-d array.");
+  }
+}
 
 array::ArrayIterator::reference array::ArrayIterator::operator*() const {
   auto start = std::vector<int>(arr.ndim(), 0);

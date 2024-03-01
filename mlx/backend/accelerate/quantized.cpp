@@ -25,8 +25,6 @@ void _qmm_t_4_64(
   constexpr int bitmask = (1 << bits) - 1;
   constexpr int pack_factor = 32 / bits;
   constexpr int packs_in_group = group_size / pack_factor;
-  const int Kg = K / group_size;
-  const int Kw = K / pack_factor;
 
   for (int m = 0; m < M; m++) {
     const uint32_t* w_local = w;
@@ -78,20 +76,16 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto& scales = inputs[2];
   auto& biases = inputs[3];
 
-  if (w.strides()[0] != 1) {
-    throw std::runtime_error("The quantized weight should be transposed");
-  }
+  bool condition =
+      (transpose_ && x.flags().row_contiguous && w.flags().row_contiguous &&
+       scales.flags().row_contiguous && biases.flags().row_contiguous &&
+       x.dtype() == float32 && bits_ == 4 && group_size_ == 64);
 
-  if (!x.flags().row_contiguous || !scales.flags().row_contiguous ||
-      !biases.flags().row_contiguous) {
-    throw std::runtime_error("x, scales and biases should be row contiguous.");
-  }
-
-  if (x.dtype() == float32 && bits_ == 4 && group_size_ == 64) {
+  if (condition) {
     out.set_data(allocator::malloc_or_wait(out.nbytes()));
     int K = x.shape(-1);
     int M = x.size() / K;
-    int N = w.shape(1);
+    int N = out.shape(-1);
     // xzl: it's clear-- x(inputs) is float, w(weights) is int (quant)
     _qmm_t_4_64(
         out.data<float>(),

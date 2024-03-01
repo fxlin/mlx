@@ -259,6 +259,170 @@ class TestAutograd(mlx_tests.MLXTestCase):
 
         self.assertTrue(mx.allclose(vjps[0], mx.zeros(shape_in)))
 
+    def test_update_state(self):
+        y = mx.array([1.0])
+        state = mx.zeros((2,))
+
+        def fn(y, x):
+            nonlocal state
+            x = y * x
+            state = state + x
+            return x.sum()
+
+        x = mx.ones((2,))
+        mx.grad(fn)(y, x)
+        mx.eval(state)
+        self.assertTrue(mx.allclose(state, mx.ones((2,))))
+
+    def test_scatter_vjp(self):
+        def fun(x, idx):
+            x[idx] = 2.0
+            return x.sum()
+
+        dfdx = mx.grad(fun)(mx.array([1.0, 2.0, 3.0]), mx.array([1]))
+        self.assertTrue(mx.array_equal(dfdx, mx.array([1.0, 0.0, 1.0])))
+        self.assertEqual(dfdx.dtype, mx.float32)
+
+        y = mx.array([0.0, 1.0, 2.0])
+
+        def fun(x, idx):
+            y[idx] = x
+            return y.sum()
+
+        dfdx = mx.grad(fun)(mx.array([2.0]), mx.array([1]))
+        self.assertTrue(mx.array_equal(dfdx, mx.array([1.0])))
+        self.assertEqual(dfdx.dtype, mx.float32)
+
+    def test_scatter_max_vjp(self):
+        def fun(src, updates):
+            x = src.at[1].maximum(updates)
+            return x
+
+        cotan = mx.array([4.0, 5.0, 6.0])
+        _, vjps = mx.vjp(fun, [mx.array([1.0, 2.0, 3.0]), mx.array([[3.0]])], [cotan])
+        mx.eval(vjps)
+
+        # Update larger than value
+        self.assertTrue(mx.allclose(vjps[0], mx.array([4.0, 0.0, 6.0])))
+        self.assertTrue(mx.allclose(vjps[1], mx.array([5.0])))
+
+        cotan = mx.array([[4.0], [5.0], [6.0]])
+        _, vjps = mx.vjp(
+            fun, [mx.array([[1.0], [2.0], [3.0]]), mx.array([[[2.0]]])], [cotan]
+        )
+        mx.eval(vjps)
+
+        # Update and value are equal
+        self.assertTrue(mx.allclose(vjps[0], mx.array([[4.0], [5.0], [6.0]])))
+        self.assertTrue(mx.allclose(vjps[1], mx.array([[[5.0]]])))
+
+    def test_scatter_min_vjp(self):
+        def fun(src, updates):
+            x = src.at[1].minimum(updates)
+            return x
+
+        cotan = mx.array([4.0, 5.0, 6.0])
+        _, vjps = mx.vjp(fun, [mx.array([1.0, 2.0, 3.0]), mx.array([[3.0]])], [cotan])
+        mx.eval(vjps)
+
+        # Update larger than value
+        self.assertTrue(mx.allclose(vjps[0], mx.array([4.0, 5.0, 6.0])))
+        self.assertTrue(mx.allclose(vjps[1], mx.array([0.0])))
+
+        cotan = mx.array([[4.0], [5.0], [6.0]])
+        _, vjps = mx.vjp(
+            fun, [mx.array([[1.0], [2.0], [3.0]]), mx.array([[[2.0]]])], [cotan]
+        )
+        mx.eval(vjps)
+
+        # Update and value are equal
+        self.assertTrue(mx.allclose(vjps[0], mx.array([[4.0], [5.0], [6.0]])))
+        self.assertTrue(mx.allclose(vjps[1], mx.array([[[5.0]]])))
+
+    def test_split_against_slice(self):
+        def f_split(x):
+            a, _, b = x.split(3, -1)
+            return (a * b).sum()
+
+        def f_slice(x):
+            step = x.shape[-1] // 3
+            a = x[..., :step]
+            b = x[..., -step:]
+            return (a * b).sum()
+
+        x = mx.random.uniform(shape=(100, 300))
+        mx.eval(x)
+
+        df1 = mx.grad(f_split)
+        df2 = mx.grad(f_slice)
+
+        self.assertTrue(mx.allclose(df1(x), df2(x)))
+
+    def test_vjp_types(self):
+        def fun(x):
+            return x
+
+        for t in [mx.float16, mx.bfloat16, mx.float32]:
+            out = mx.grad(fun)(mx.array(1.0, t))
+            self.assertEqual(out.dtype, t)
+
+        def fun(x):
+            return x.sum()
+
+        for t in [mx.float16, mx.bfloat16, mx.float32]:
+            out = mx.grad(fun)(mx.array(1.0, t))
+            self.assertEqual(out.dtype, t)
+
+        def fun(x, y):
+            return (x + y).sum()
+
+        for t in [mx.float16, mx.bfloat16, mx.float32]:
+            out = mx.grad(fun)(mx.array(1.0, t), mx.array(1.0, t))
+            self.assertEqual(out.dtype, t)
+
+    def test_power_grad(self):
+        x = mx.array(0.0)
+        g = mx.grad(lambda x: x**2)(x)
+        self.assertEqual(g.item(), 0.0)
+
+        x = mx.array(0.0)
+        g = mx.grad(lambda x: x**1.5)(x)
+        self.assertEqual(g.item(), 0.0)
+
+        x = mx.array(2.0)
+        g = mx.grad(lambda x: x**2)(x)
+        self.assertAlmostEqual(g.item(), 4.0)
+
+    def test_eval_in_grad(self):
+        arr = mx.array([1.0])
+        cotan = mx.array([1.0, 1.0])
+        y = mx.array([2.0, 2.0])
+
+        def func(x):
+            x = x + y
+            cond = x < 1
+            cond.tolist()
+            return x**2
+
+        _, vjps = mx.vjp(func, (arr,), (cotan,))
+        self.assertEqual(vjps[0].item(), 12.0)
+
+        def func(x):
+            x = x + mx.array([1.0, 1.0])
+            mx.eval(x)
+            return x**2
+
+        _, vjps = mx.vjp(func, (arr,), (cotan,))
+        self.assertEqual(vjps[0].item(), 8.0)
+
+    def test_power_grad(self):
+        def fun(x, y):
+            res = x - y
+            return res**x
+
+        grad = mx.grad(fun)(mx.array(1.0), mx.array(1.0))
+        self.assertEqual(grad.item(), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

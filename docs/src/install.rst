@@ -1,8 +1,8 @@
 Build and Install
 =================
 
-Install from PyPI
------------------
+Python Installation
+-------------------
 
 MLX is available on PyPI. All you have to do to use MLX with your own Apple
 silicon computer is
@@ -20,6 +20,14 @@ To install from PyPI you must meet the following requirements:
 .. note::
     MLX is only available on devices running macOS >= 13.3 
     It is highly recommended to use macOS 14 (Sonoma)
+
+
+MLX is also available on conda-forge. To install MLX with conda do:
+
+.. code-block:: shell
+
+   conda install conda-forge::mlx
+
 
 Troubleshooting
 ^^^^^^^^^^^^^^^
@@ -48,6 +56,9 @@ Build Requirements
 - `cmake <https://cmake.org/>`_ -- version 3.24 or later, and ``make``
 - Xcode >= 14.3 (Xcode >= 15.0 for macOS 14 and above)
 
+.. note::
+   Ensure your shell environment is native ``arm``, not ``x86`` via Rosetta. If
+   the output of ``uname -p`` is ``x86``, see the :ref:`troubleshooting section <build shell>` below.
 
 Python API
 ^^^^^^^^^^
@@ -169,6 +180,7 @@ should point to the path to the built metal library.
 Troubleshooting
 ^^^^^^^^^^^^^^^
 
+
 Metal not found
 ~~~~~~~~~~~~~~~
 
@@ -189,3 +201,34 @@ Then set the active developer directory:
 .. code-block:: shell
 
   sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+
+x86 Shell 
+~~~~~~~~~
+
+.. _build shell:
+
+If the ouptut of ``uname -p``  is ``x86`` then your shell is running as x86 via
+Rosetta instead of natively.
+
+To fix this, find the application in Finder (``/Applications`` for iTerm,
+``/Applications/Utilities`` for Terminal), right-click, and click “Get Info”.
+Uncheck “Open using Rosetta”, close the “Get Info” window, and restart your
+terminal.
+
+Verify the terminal is now running natively the following command:
+
+.. code-block:: shell
+
+  $ uname -p
+  arm
+
+Also check that cmake is using the correct architecture:
+
+.. code-block:: shell
+
+  $ cmake --system-information | grep CMAKE_HOST_SYSTEM_PROCESSOR
+  CMAKE_HOST_SYSTEM_PROCESSOR "arm64"
+
+If you see ``"x86_64"``, try re-installing ``cmake``. If you see ``"arm64"``
+but the build errors out with "Building for x86_64 on macOS is not supported."
+wipe your build cahce with ``rm -rf build/`` and try again.

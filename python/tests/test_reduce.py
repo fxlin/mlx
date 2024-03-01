@@ -55,6 +55,8 @@ class TestReduce(mlx_tests.MLXTestCase):
             "uint8",
             "uint16",
             "uint32",
+            "int64",
+            "uint64",
         ]
         float_dtypes = ["float32"]
 
@@ -65,7 +67,6 @@ class TestReduce(mlx_tests.MLXTestCase):
 
                 for op in ("sum", "prod", "min", "max"):
                     with self.subTest(op=op):
-
                         np_op = getattr(np, op)
                         mlx_op = getattr(mx, op)
 
@@ -96,7 +97,6 @@ class TestReduce(mlx_tests.MLXTestCase):
         ]
         for dtype in dtypes:
             with self.subTest(dtype=dtype):
-
                 data = np.random.rand(10, 12, 13).astype(getattr(np, dtype))
                 x = mx.array(data)
                 for op in ["argmin", "argmax"]:

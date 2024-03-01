@@ -6,6 +6,8 @@
 
 #include "mlx/allocator.h"
 #include "mlx/backend/common/binary.h"
+#include "mlx/backend/common/binary_two.h"
+#include "mlx/backend/common/ops.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
@@ -72,95 +74,118 @@ void Add::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return x + y; });
+  binary(a, b, out, detail::Add());
+}
+
+void DivMod::eval(
+    const std::vector<array>& inputs,
+    std::vector<array>& outputs) {
+  assert(inputs.size() == 2);
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  auto integral_op = [](auto x, auto y) {
+    return std::make_pair(x / y, x % y);
+  };
+  auto float_op = [](auto x, auto y) {
+    return std::make_pair(std::trunc(x / y), std::fmod(x, y));
+  };
+  switch (outputs[0].dtype()) {
+    case bool_:
+      binary_op<bool>(a, b, outputs, integral_op);
+    case uint8:
+      binary_op<uint8_t>(a, b, outputs, integral_op);
+      break;
+    case uint16:
+      binary_op<uint16_t>(a, b, outputs, integral_op);
+      break;
+    case uint32:
+      binary_op<uint32_t>(a, b, outputs, integral_op);
+      break;
+    case uint64:
+      binary_op<uint64_t>(a, b, outputs, integral_op);
+      break;
+    case int8:
+      binary_op<int8_t>(a, b, outputs, integral_op);
+      break;
+    case int16:
+      binary_op<int16_t>(a, b, outputs, integral_op);
+      break;
+    case int32:
+      binary_op<int32_t>(a, b, outputs, integral_op);
+      break;
+    case int64:
+      binary_op<int64_t>(a, b, outputs, integral_op);
+      break;
+    case float16:
+      binary_op<float16_t>(a, b, outputs, float_op);
+      break;
+    case float32:
+      binary_op<float>(a, b, outputs, float_op);
+      break;
+    case bfloat16:
+      binary_op<bfloat16_t>(a, b, outputs, float_op);
+      break;
+    case complex64:
+      // Should never get here
+      throw std::runtime_error("[DivMod] Complex type not supported");
+      break;
+  }
 }
 
 void Divide::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return x / y; });
+  binary(a, b, out, detail::Divide());
 }
-
-struct RemainderFn {
-  template <typename T>
-  std::enable_if_t<!std::is_integral_v<T>, T> operator()(
-      T numerator,
-      T denominator) {
-    return std::fmod(numerator, denominator);
-  }
-
-  template <typename T>
-  std::enable_if_t<std::is_integral_v<T>, T> operator()(
-      T numerator,
-      T denominator) {
-    return numerator % denominator;
-  }
-};
 
 void Remainder::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, RemainderFn{});
+  binary(a, b, out, detail::Remainder());
 }
 
 void Equal::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   if (equal_nan_) {
-    comparison_op(inputs[0], inputs[1], out, [](auto x, auto y) {
-      return x == y || (std::isnan(x) && std::isnan(y));
-    });
+    comparison_op(inputs[0], inputs[1], out, detail::NaNEqual());
   } else {
-    comparison_op(
-        inputs[0], inputs[1], out, [](auto x, auto y) { return x == y; });
+    comparison_op(inputs[0], inputs[1], out, detail::Equal());
   }
 }
 
 void Greater::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
-  comparison_op(
-      inputs[0], inputs[1], out, [](auto x, auto y) { return x > y; });
+  comparison_op(inputs[0], inputs[1], out, detail::Greater());
 }
 
 void GreaterEqual::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
-  comparison_op(
-      inputs[0], inputs[1], out, [](auto x, auto y) { return x >= y; });
+  comparison_op(inputs[0], inputs[1], out, detail::GreaterEqual());
 }
 
 void Less::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
-  comparison_op(
-      inputs[0], inputs[1], out, [](auto x, auto y) { return x < y; });
+  comparison_op(inputs[0], inputs[1], out, detail::Less());
 }
 
 void LessEqual::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
-  comparison_op(
-      inputs[0], inputs[1], out, [](auto x, auto y) { return x <= y; });
+  comparison_op(inputs[0], inputs[1], out, detail::LessEqual());
 }
 
 void LogAddExp::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  auto op = [](auto x, auto y) {
-    constexpr float inf = std::numeric_limits<float>::infinity();
-    auto maxval = (x > y) ? x : y;
-    auto minval = (x > y) ? y : x;
-    return (minval == -inf || maxval == inf)
-        ? maxval
-        : static_cast<decltype(x)>(
-              maxval + std::log1p(std::exp(minval - maxval)));
-  };
   if (is_floating_point(out.dtype())) {
     if (out.dtype() == float32) {
-      binary_op<float>(a, b, out, op);
+      binary_op<float>(a, b, out, detail::LogAddExp());
     } else if (out.dtype() == float16) {
-      binary_op<float16_t>(a, b, out, op);
+      binary_op<float16_t>(a, b, out, detail::LogAddExp());
     } else if (out.dtype() == bfloat16) {
-      binary_op<bfloat16_t>(a, b, out, op);
+      binary_op<bfloat16_t>(a, b, out, detail::LogAddExp());
     } else {
       std::ostringstream err;
       err << "[logaddexp] Does not support " << out.dtype();
@@ -177,65 +202,40 @@ void Maximum::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return (x > y) ? x : y; });
+  binary(a, b, out, detail::Maximum());
 }
 
 void Minimum::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return (x < y) ? x : y; });
+  binary(a, b, out, detail::Minimum());
 }
 
 void Multiply::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return x * y; });
+  binary(a, b, out, detail::Multiply());
 }
 
 void NotEqual::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
-  comparison_op(
-      inputs[0], inputs[1], out, [](auto x, auto y) { return x != y; });
+  comparison_op(inputs[0], inputs[1], out, detail::NotEqual());
 }
-
-struct PowerFn {
-  template <typename T>
-  std::enable_if_t<!std::is_integral_v<T>, T> operator()(T base, T exp) {
-    return std::pow(base, exp);
-  }
-
-  template <typename T>
-  std::enable_if_t<std::is_integral_v<T>, T> operator()(T base, T exp) {
-    if (exp < 0) {
-      throw std::invalid_argument(
-          "Integers cannot be raise to negative powers");
-    }
-    T res = 1;
-    while (exp) {
-      if (exp & 1) {
-        res *= base;
-      }
-      exp >>= 1;
-      base *= base;
-    }
-    return res;
-  }
-};
 
 void Power::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, PowerFn{});
+  binary(a, b, out, detail::Power());
 }
 
 void Subtract::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
-  binary(a, b, out, [](auto x, auto y) { return x - y; });
+  binary(a, b, out, detail::Subtract());
 }
 
 } // namespace mlx::core

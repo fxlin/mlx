@@ -11,68 +11,24 @@ namespace mlx::core {
 
 namespace {
 
-struct AbsOp {
-  template <typename T>
-  T operator()(T x) {
-    return std::abs(x);
+void set_unary_output_data(const array& in, array& out) {
+  if (in.is_donatable() && in.itemsize() == out.itemsize()) {
+    out.copy_shared_buffer(in);
+  } else {
+    auto size = in.data_size();
+    out.set_data(
+        allocator::malloc_or_wait(size * out.itemsize()),
+        size,
+        in.strides(),
+        in.flags());
   }
-  uint8_t operator()(uint8_t x) {
-    return x;
-  }
-  uint16_t operator()(uint16_t x) {
-    return x;
-  }
-  uint32_t operator()(uint32_t x) {
-    return x;
-  }
-  uint64_t operator()(uint64_t x) {
-    return x;
-  }
-  bool operator()(bool x) {
-    return x;
-  }
-};
-
-struct SignOp {
-  template <typename T>
-  T operator()(T x) {
-    return (x > T(0)) - (x < T(0));
-  }
-
-  uint8_t operator()(uint8_t x) {
-    return x != 0;
-  }
-  uint16_t operator()(uint16_t x) {
-    return x != 0;
-  }
-  uint32_t operator()(uint32_t x) {
-    return x != 0;
-  }
-  uint64_t operator()(uint64_t x) {
-    return x != 0;
-  }
-};
-
-struct RoundOp {
-  template <typename T>
-  T operator()(T x) {
-    return std::round(x);
-  }
-
-  complex64_t operator()(complex64_t x) {
-    return {std::round(x.real()), std::round(x.imag())};
-  }
-};
+}
 
 template <typename T, typename Op>
 void unary_op(const array& a, array& out, Op op) {
   const T* a_ptr = a.data<T>();
   if (a.flags().contiguous) {
-    out.set_data(
-        allocator::malloc_or_wait(a.data_size() * out.itemsize()),
-        a.data_size(),
-        a.strides(),
-        a.flags());
+    set_unary_output_data(a, out);
     T* dst = out.data<T>();
     for (size_t i = 0; i < a.data_size(); ++i) {
       dst[i] = op(a_ptr[i]);

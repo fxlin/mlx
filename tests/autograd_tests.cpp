@@ -95,19 +95,14 @@ TEST_CASE("test jvp") {
     CHECK_EQ(dout[0].item<float>(), 4.0f);
   }
 
-  // Evaling in function without graph retention throws
+  // Evaling in function while tracing performs graph retention
   {
-    auto fun = [](const array& x) {
-      auto y = 3 * x;
-      eval(y);
-      return 2 * y;
-    };
-    CHECK_THROWS(jvp(fun, array(1.0f), array(1.0f)));
-
-    // Ok with graph retention
     auto fun1 = [](const array& x) {
       auto y = 3 * x;
-      eval({y}, true);
+      eval(y);
+      CHECK(y.is_evaled());
+      CHECK(y.has_primitive());
+      CHECK(y.is_tracer());
       return 2 * y;
     };
     CHECK_EQ(jvp(fun1, array(1.0f), array(1.0f)).second.item<float>(), 6.0f);
@@ -243,37 +238,35 @@ TEST_CASE("test grad") {
     auto x = array(1.);
     auto expfn = [](array input) { return exp(input); };
     auto dfdx = grad(expfn);
-    CHECK_EQ(dfdx(x).item<float>(), std::exp(1.0f));
+    CHECK_EQ(dfdx(x).item<float>(), doctest::Approx(std::exp(1.0f)));
     auto d2fdx2 = grad(grad(expfn));
-    CHECK_EQ(d2fdx2(x).item<float>(), std::exp(1.0f));
+    CHECK_EQ(d2fdx2(x).item<float>(), doctest::Approx(std::exp(1.0f)));
     auto d3fdx3 = grad(grad(grad(expfn)));
-    CHECK_EQ(d3fdx3(x).item<float>(), std::exp(1.0f));
+    CHECK_EQ(d3fdx3(x).item<float>(), doctest::Approx(std::exp(1.0f)));
   }
 
   {
-    // Evaluating in the middle of the grad function throws
-    // as it breaks the graph
-    auto fn = [](array x) {
-      x = x + 2.0f;
-      eval(x);
-      return square(x);
-    };
-    CHECK_THROWS(grad(fn)(array(1.0f)));
-
-    // Ok since the output is independent of y
+    // No graph retention since the output is independent of y
     auto y = ones({3, 3});
     auto fn1 = [y](array x) {
       x = x + 2.0f;
       eval(y);
+      CHECK(x.is_tracer());
+      CHECK(!y.is_tracer());
+      CHECK(y.is_evaled());
+      CHECK(!y.has_primitive());
       return square(x);
     };
     auto dfdx = grad(fn1)(array(1.0f));
     CHECK_EQ(dfdx.item<float>(), 6.0f);
 
-    // Retain the graph to avoid breaking it
+    // Graph automatically retained to compute the grad
     auto fn2 = [](array x) {
       x = x + 2.0f;
-      eval({x}, true);
+      eval(x);
+      CHECK(x.is_tracer());
+      CHECK(x.is_evaled());
+      CHECK(x.has_primitive());
       return square(x);
     };
     dfdx = grad(fn2)(array(1.0f));
@@ -283,7 +276,8 @@ TEST_CASE("test grad") {
   // Control flow in grad computation
   {
     auto fn = [](array x) {
-      if (x.item<float>(true) > 1) {
+      x = x + array(2.0f);
+      if (x.item<float>() > 3) {
         return square(x);
       } else {
         return 4 * x;
@@ -294,7 +288,7 @@ TEST_CASE("test grad") {
     CHECK_EQ(dfdx.item<float>(), 4.0f);
 
     dfdx = grad(fn)(array(1.5f));
-    CHECK_EQ(dfdx.item<float>(), 3.0f);
+    CHECK_EQ(dfdx.item<float>(), 7.0f);
   }
 
   // Grad with multiple inputs
@@ -399,7 +393,7 @@ TEST_CASE("test op vjps") {
   // Test exp
   {
     auto out = vjp([](array in) { return exp(in); }, array(1.0f), array(2.0f));
-    CHECK_EQ(out.second.item<float>(), 2.0f * std::exp(1.0f));
+    CHECK_EQ(out.second.item<float>(), doctest::Approx(2.0f * std::exp(1.0f)));
   }
 
   // Test sin
@@ -928,6 +922,35 @@ TEST_CASE("test concatenate grads") {
       array_equal(out[0], array({0.0f, 0.0f, 2.0f, 0.0f, 3.0f})).item<bool>());
 }
 
+TEST_CASE("test split grads") {
+  array x = arange(6, float32);
+  eval(x);
+
+  {
+    auto fn = [](const array& x) {
+      auto parts = split(x, 3);
+      return parts[0] * parts[1] + parts[2];
+    };
+    auto out = vjp(fn, {x}, {ones({2})}).second;
+
+    CHECK_EQ(out.size(), 6);
+    CHECK(array_equal(out, array({2.0f, 3.0f, 0.0f, 1.0f, 1.0f, 1.0f}))
+              .item<bool>());
+  }
+
+  {
+    auto fn = [](const array& x) {
+      auto parts = split(x, 3);
+      return parts[0] * parts[2];
+    };
+    auto out = vjp(fn, {x}, {ones({2})}).second;
+
+    CHECK_EQ(out.size(), 6);
+    CHECK(array_equal(out, array({4.0f, 5.0f, 0.0f, 0.0f, 0.0f, 1.0f}))
+              .item<bool>());
+  }
+}
+
 TEST_CASE("test comparison grads") {
   auto x = ones({3, 1});
   auto y = zeros({1, 3});
@@ -1051,6 +1074,37 @@ TEST_CASE("test jvp from vjp") {
     CHECK(compute_derivs(multiply));
     CHECK(compute_derivs(subtract));
     CHECK(compute_derivs(power));
+  }
+
+  // Conditional selection element-wise op
+  {
+    auto condition = random::randint(0, 2, {5, 10});
+    auto x = random::uniform({5, 10});
+    auto y = random::uniform({5, 10});
+    eval(condition, x, y);
+
+    auto compute_derivs = [&condition, &x, &y](auto fn) {
+      auto fn_wrap = [&fn](std::vector<array> inputs) {
+        return std::vector<array>{
+            fn(inputs[0], inputs[1], inputs[2], default_device())};
+      };
+
+      // Compute vjp and add results
+      auto vjps = vjp(fn_wrap, {condition, x, y}, {ones(x.shape())}).second;
+      auto vjp_out = add(add(vjps[0], vjps[1]), vjps[2]);
+
+      // Compute jvp
+      array jvp_out =
+          jvp(fn_wrap,
+              {condition, x, y},
+              {ones(condition.shape()), ones(y.shape()), ones(x.shape())})
+              .second[0];
+
+      array result = array_equal(vjp_out, jvp_out);
+      return result.item<bool>();
+    };
+
+    CHECK(compute_derivs(where));
   }
 }
 
@@ -1190,5 +1244,47 @@ TEST_CASE("test scan grads") {
     out = jvp(fun, x, ones({4})).second;
     expected = array({0.0f, 1.0f, 2.0f, 3.0f}, {4});
     CHECK(array_equal(out, expected).item<bool>());
+  }
+}
+
+TEST_CASE("test update state") {
+  auto y = array({1.0});
+  auto x = array({1.0, 1.0});
+  auto state = array({0.0, 0.0});
+  auto fn = [&state, &x](array y) {
+    x = y * x;
+    state = state + x;
+    return sum(x);
+  };
+  grad(fn)(y);
+  eval(state);
+  CHECK(!state.has_primitive());
+  CHECK(state.is_evaled());
+  CHECK(array_equal(state, array({1.0, 1.0})).item<bool>());
+}
+
+TEST_CASE("test grad types") {
+  {
+    auto fn = [](array x) { return sum(x); };
+
+    for (auto t : {float16, bfloat16, float32}) {
+      auto x = array(1.0, t);
+      auto dfdx = grad(fn)(x);
+      CHECK_EQ(dfdx.dtype(), t);
+    }
+  }
+
+  {
+    // Check for multi-input grad
+    auto fn = [](std::vector<array> inputs) {
+      return sum(inputs[0] + inputs[1]);
+    };
+
+    for (auto t : {float16, bfloat16, float32}) {
+      auto x = array(1.0, t);
+      auto y = array(1.0, t);
+      auto out = grad(fn)({x, y});
+      CHECK_EQ(out[0].dtype(), t);
+    }
   }
 }

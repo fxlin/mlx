@@ -14,17 +14,20 @@ if (MLX_BUILD_METAL)
   )
 endif()
 
-target_sources(tests PRIVATE 
+include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+
+target_sources(tests PRIVATE
   allocator_tests.cpp
   array_tests.cpp
   arg_reduce_tests.cpp
   autograd_tests.cpp
   blas_tests.cpp
+  compile_tests.cpp
+  custom_vjp_tests.cpp
   creations_tests.cpp
   device_tests.cpp
   eval_tests.cpp
   fft_tests.cpp
-  graph_optimize_tests.cpp
   load_tests.cpp
   ops_tests.cpp
   random_tests.cpp
@@ -36,4 +39,5 @@ target_sources(tests PRIVATE
 )
 
 target_link_libraries(tests PRIVATE mlx doctest)
+doctest_discover_tests(tests)
 add_test(NAME tests COMMAND tests)

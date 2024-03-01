@@ -15,19 +15,22 @@ class TestEval(mlx_tests.MLXTestCase):
             self.assertEqual(x.tolist(), [[1, 1], [1, 1]])
 
     def test_retain_graph(self):
-        def fun(x, retain_graph):
+        def fun(x):
             y = 3 * x
-            mx.eval(y, retain_graph=retain_graph)
+            mx.eval(y)
             return 2 * y
 
-        dfun_dx_1 = mx.grad(partial(fun, retain_graph=False))
-        dfun_dx_2 = mx.grad(partial(fun, retain_graph=True))
-
-        with self.assertRaises(ValueError):
-            dfun_dx_1(mx.array(1.0))
-
-        y = dfun_dx_2(mx.array(1.0))
+        dfun_dx = mx.grad(fun)
+        y = dfun_dx(mx.array(1.0))
         self.assertEqual(y.item(), 6.0)
+
+    def test_eval_mixed(self):
+        x = mx.array(1) + 1 + 1
+        y = 0
+        z = "hello"
+        state = [x, y, z]
+        mx.eval(state)
+        self.assertEqual(x.item(), 3)
 
 
 if __name__ == "__main__":

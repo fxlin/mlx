@@ -1,4 +1,4 @@
-# Copyright © 2023 Apple Inc.
+# Copyright © 2023-2024 Apple Inc.
 
 import math
 from typing import Optional
@@ -20,7 +20,7 @@ class RoPE(Module):
     Args:
         dims (int): The feature dimensions to be rotated. If the input feature
             is larger than dims then the rest is left unchanged.
-        traditional (bool, optional): If set to True choose the traditional
+        traditional (bool, optional): If set to ``True`` choose the traditional
             implementation which is slightly less efficient. Default: ``False``.
         base (float, optional): The base used to compute angular frequency for
             each dimension in the positional encodings. Default: ``10000``.
@@ -43,63 +43,18 @@ class RoPE(Module):
     def _extra_repr(self):
         return f"{self.dims}, traditional={self.traditional}"
 
-    def _compute_rope(self, costheta, sintheta, x):
-        x1 = x[..., : self.dims // 2]
-        x2 = x[..., self.dims // 2 : self.dims]
-        rx1 = x1 * costheta - x2 * sintheta
-        rx2 = x1 * sintheta + x2 * costheta
-
-        if self.dims < x.shape[-1]:
-            rx = mx.concatenate([rx1, rx2, x[..., self.dims :]], axis=-1)
-        else:
-            rx = mx.concatenate([rx1, rx2], axis=-1)
-
-        return rx
-
-    def _compute_traditional_rope(self, costheta, sintheta, x):
-        x1 = x[..., ::2]
-        x2 = x[..., 1::2]
-        rx1 = x1 * costheta - x2 * sintheta
-        rx2 = x1 * sintheta + x2 * costheta
-
-        if self.dims < x.shape[-1]:
-            raise NotImplementedError(
-                "RoPE doesn't implement partial traditional application"
-            )
-
-        rx = mx.concatenate([rx1[..., None], rx2[..., None]], axis=-1)
-
-        return rx
-
     def __call__(self, x, offset: int = 0):
         shape = x.shape
         x = mx.reshape(x, (-1, shape[-2], shape[-1]))
-        N = x.shape[1] + offset
-        costheta, sintheta = RoPE.create_cos_sin_theta(
-            N, self.dims, offset=offset, base=self.base, scale=self.scale, dtype=x.dtype
+        x = mx.fast.rope(
+            x,
+            self.dims,
+            traditional=self.traditional,
+            base=self.base,
+            scale=self.scale,
+            offset=offset,
         )
-
-        rope = (
-            self._compute_traditional_rope if self.traditional else self._compute_rope
-        )
-        rx = rope(costheta, sintheta, x)
-
-        return mx.reshape(rx, shape)
-
-    @staticmethod
-    def create_cos_sin_theta(
-        N: int,
-        D: int,
-        offset: int = 0,
-        base: float = 10000,
-        scale: float = 1.0,
-        dtype=mx.float32,
-    ):
-        D = D // 2
-        positions = mx.arange(offset, N, dtype=dtype) * scale
-        freqs = mx.exp(-mx.arange(0.0, D, dtype=dtype) * (math.log(base) / D))
-        theta = mx.reshape(positions, (-1, 1)) * mx.reshape(freqs, (1, -1))
-        return mx.cos(theta), mx.sin(theta)
+        return mx.reshape(x, shape)
 
 
 class SinusoidalPositionalEncoding(Module):
@@ -163,22 +118,42 @@ class SinusoidalPositionalEncoding(Module):
 
 
 class ALiBi(Module):
-    @staticmethod
+    _alibi_mask_key = None
+    _alibi_mask = None
+
+    @classmethod
     def create_alibi_matrix(
+        cls,
         q_sequence_length: int,
         k_sequence_length: int,
         num_heads: int,
         offset: int,
         dtype=mx.float32,
     ):
-        x1 = mx.arange(offset, q_sequence_length)
-        x2 = mx.arange(0, k_sequence_length)
-        distance_matrix = -mx.abs(
-            mx.expand_dims(x1[:, None] - x2[None, :], axis=(0, 1))
-        )
-        alibi_slope = ALiBi.create_alibi_slope(num_heads=num_heads)
-        alibi_mask = (distance_matrix * alibi_slope).astype(dtype)
-        return alibi_mask
+        if (
+            q_sequence_length,
+            k_sequence_length,
+            num_heads,
+            offset,
+            dtype,
+        ) != cls._alibi_mask_key:
+            x1 = mx.arange(offset, q_sequence_length)
+            x2 = mx.arange(0, k_sequence_length)
+            distance_matrix = -mx.abs(
+                mx.expand_dims(x1[:, None] - x2[None, :], axis=(0, 1))
+            )
+            alibi_slope = ALiBi.create_alibi_slope(num_heads=num_heads)
+            alibi_mask = (distance_matrix * alibi_slope).astype(dtype)
+            cls._alibi_mask_key = (
+                q_sequence_length,
+                k_sequence_length,
+                num_heads,
+                offset,
+                dtype,
+            )
+            cls._alibi_mask = alibi_mask
+
+        return cls._alibi_mask
 
     @staticmethod
     def create_alibi_slope(num_heads):

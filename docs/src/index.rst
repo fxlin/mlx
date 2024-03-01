@@ -35,9 +35,15 @@ are the CPU and GPU.
    :caption: Usage 
    :maxdepth: 1
 
-   quick_start
-   unified_memory
-   using_streams
+   usage/quick_start
+   usage/lazy_evaluation
+   usage/unified_memory
+   usage/indexing
+   usage/saving_and_loading
+   usage/function_transforms
+   usage/compile
+   usage/numpy
+   usage/using_streams
 
 .. toctree::
    :caption: Examples

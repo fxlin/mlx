@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <optional>
 
 #include "mlx/array.h"
@@ -18,12 +19,18 @@ class KeySequence {
 
   // static default
   static KeySequence& default_() {
-    static KeySequence ks(0);
+    static KeySequence ks(get_current_time_seed());
     return ks;
   }
 
  private:
   array key_;
+  static uint64_t get_current_time_seed() {
+    auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               now.time_since_epoch())
+        .count();
+  }
 };
 
 /** Get a PRNG key from a seed. */
@@ -88,13 +95,30 @@ inline array uniform(
 array normal(
     const std::vector<int>& shape,
     Dtype dtype,
+    const float loc,
+    const float scale,
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {});
 inline array normal(
     const std::vector<int>& shape,
+    const float loc,
+    const float scale,
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {}) {
-  return normal(shape, float32, key, s);
+  return normal(shape, float32, loc, scale, key, s);
+}
+inline array normal(
+    const std::vector<int>& shape,
+    const Dtype dtype,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {}) {
+  return normal(shape, dtype, 0.0, 1.0, key, s);
+}
+inline array normal(
+    const std::vector<int>& shape,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {}) {
+  return normal(shape, float32, 0.0, 1.0, key, s);
 }
 
 /** Generate integer samples uniformly at random */
