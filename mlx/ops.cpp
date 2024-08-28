@@ -12,6 +12,8 @@
 #include "mlx/transforms.h"
 #include "mlx/utils.h"
 
+#include <iostream>
+
 namespace mlx::core {
 
 namespace {
@@ -3419,12 +3421,22 @@ array quantized_matmul(
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "quantized_matmul", x, w, scales, biases, transpose, group_size, bits);
 
-  if (w.ndim() != 2) {
-    std::ostringstream msg;
-    msg << "[quantized_matmul] Batched quantized matmul is not supported for now "
-        << "received w with shape " << w.shape();
-    throw std::invalid_argument(msg.str());
-  }
+  std::cout << w_inner_dims << "_" << w_outer_dims << std::endl;
+
+  auto out_shape = x.shape();
+  out_shape.back() = w_outer_dims;
+
+  std::cout << "w_outer_dims " << w_outer_dims << std::endl;
+  std::cout << "out_shape " << out_shape << std::endl;
+
+  // if (w.ndim() != 2) {
+  //   std::ostringstream msg;
+  //   std::cout << "x shape " << x.shape() << std::endl;
+  //   msg << "[quantized_matmul] Batched quantized matmul is not supported for
+  //   now "
+  //       << "received w with shape " << w.shape();
+  //   throw std::invalid_argument(msg.str());
+  // }
 
   auto dtype = result_type(x, scales, biases);
   if (!issubdtype(dtype, floating)) {
@@ -3436,8 +3448,6 @@ array quantized_matmul(
     throw std::invalid_argument(msg.str());
   }
 
-  auto out_shape = x.shape();
-  out_shape.back() = w_outer_dims;
   return array(
       std::move(out_shape),
       dtype,
@@ -3486,6 +3496,9 @@ array gather_qmm(
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "gather_qmm", x, w, scales, biases, transpose, group_size, bits);
 
+  auto out_shape = x.shape();
+  out_shape[-1] = w_outer_dims;
+
   // Extract indices and broadcast them
   array lhs_indices = indices_or_default(lhs_indices_, x, s);
   array rhs_indices = indices_or_default(rhs_indices_, w, s);
@@ -3495,9 +3508,9 @@ array gather_qmm(
   rhs_indices = broadcast_to(rhs_indices, out_bsx_shape, s);
 
   // Compute the full output shape
-  auto out_shape = out_bsx_shape;
-  out_shape.push_back(x.shape(-2));
-  out_shape.push_back(w_outer_dims);
+  // auto out_shape = out_bsx_shape;
+  // out_shape.push_back(x.shape(-2));
+  // out_shape.push_back(w_outer_dims);
 
   // and output type
   auto out_type = result_type(x, scales, biases);

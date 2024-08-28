@@ -42,6 +42,16 @@ array scaled_dot_product_attention(
     const std::optional<int>& memory_efficient_threshold = std::nullopt,
     StreamOrDevice s = {});
 
+array quantized_scaled_dot_product_attention(
+    const array& queries,
+    const std::tuple<array, array, array>& keys,
+    const std::tuple<array, array, array>& values,
+    const float scale,
+    const std::optional<array>& mask,
+    int group_size = 64,
+    int bits = 4,
+    StreamOrDevice s = {});
+
 std::tuple<array, array, array> affine_quantize(
     const array& w,
     int group_size = 64,

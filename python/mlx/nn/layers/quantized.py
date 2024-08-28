@@ -202,6 +202,7 @@ class QuantizedLinear(Module):
         )
 
     def __call__(self, x):
+        print("x", x.shape)
         x = mx.quantized_matmul(
             x,
             self["weight"],

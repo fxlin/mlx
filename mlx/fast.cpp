@@ -10,6 +10,8 @@
 #include "mlx/ops.h"
 #include "mlx/transforms.h"
 
+#include <iostream>
+
 namespace mlx::core::fast {
 
 std::vector<array> Custom::vjp(
@@ -605,11 +607,15 @@ array scaled_dot_product_attention(
       k = expand_dims(k, 2, s);
       v = expand_dims(v, 2, s);
     }
+    std::cout << "q " << q.shape() << std::endl;
+    std::cout << "k " << k.shape() << std::endl;
     auto scores = matmul(q, swapaxes(k, -1, -2, s), s);
     if (needs_mask) {
       scores = add(scores, inputs[3], s);
     }
     scores = softmax(scores, std::vector<int>{-1}, true, s);
+    std::cout << "scores " << scores.shape() << std::endl;
+    std::cout << "v " << v.shape() << std::endl;
     auto out = matmul(scores, v, s);
     if (n_repeats > 1) {
       out = reshape(out, {B, n_q_heads, L, -1}, s);
@@ -667,6 +673,51 @@ bool ScaledDotProductAttention::is_equivalent(const Primitive& other) const {
   return needs_mask_ == a_other.needs_mask_ && scale_ == a_other.scale_;
 }
 
+/** Computes: O = softmax(Q @ K.T) @ V **/
+array quantized_scaled_dot_product_attention(
+    const array& queries,
+    const std::tuple<array, array, array>& keys,
+    const std::tuple<array, array, array>& values,
+    const float scale,
+    const std::optional<array>& mask,
+    int group_size,
+    int bits,
+    StreamOrDevice s_) {
+  auto s = to_stream(s_);
+
+  auto n_q_heads = queries.shape(-3);
+  auto n_kv_heads = std::get<0>(keys).shape(-3);
+
+  auto q = multiply(array(scale, queries.dtype()), queries, s);
+  int n_repeats = n_q_heads / n_kv_heads;
+  int B = q.shape(0);
+  int L = q.shape(2);
+
+  auto [k_values, k_scales, k_biases] = keys;
+  auto [v_values, v_scales, v_biases] = values;
+  if (n_repeats > 1) {
+    q = reshape(q, {B, n_kv_heads, n_repeats, L, -1}, s);
+    k_values = expand_dims(k_values, 2, s);
+    k_scales = expand_dims(k_scales, 2, s);
+    k_biases = expand_dims(k_biases, 2, s);
+    v_values = expand_dims(v_values, 2, s);
+    v_scales = expand_dims(v_scales, 2, s);
+    v_biases = expand_dims(v_biases, 2, s);
+  }
+  auto scores = quantized_matmul(
+      q, k_values, k_scales, k_biases, true, group_size, bits, s);
+  if (mask.has_value()) {
+    scores = add(scores, mask.value(), s);
+  }
+  scores = softmax(scores, -1, true, s);
+  auto out = quantized_matmul(
+      scores, v_values, v_scales, v_biases, false, group_size, bits, s);
+  if (n_repeats > 1) {
+    out = reshape(out, {B, n_q_heads, L, -1}, s);
+  }
+  return out;
+}
+
 array pack_and_quantize(
     array& packed_w,
     const array& scales,
@@ -697,7 +748,7 @@ affine_quantize(const array& w, int group_size, int bits, StreamOrDevice s_) {
   if (group_size != 32 && group_size != 64 && group_size != 128) {
     std::ostringstream msg;
     msg << "[quantize] The requested group size " << group_size
-        << " is not supported. The supported group sizes are 64 and 128.";
+        << " is not supported. The supported group sizes are 32, 64 and 128.";
     throw std::invalid_argument(msg.str());
   }
 
@@ -724,15 +775,6 @@ affine_quantize(const array& w, int group_size, int bits, StreamOrDevice s_) {
   }
 
   int el_per_int = 32 / bits;
-
-  if (w.shape(-1) < 32 * el_per_int) {
-    std::ostringstream msg;
-    msg << "[quantize] The feature dimension (2nd dimension of the matrix) is "
-        << "too small for quantization. We support >=512 for 2 bits, "
-        << ">= 256 for 4 bits and >= 128 for 8 bits. The provided matrix has "
-        << "shape " << w.shape() << ".";
-    throw std::invalid_argument(msg.str());
-  }
 
   auto fallback = [group_size, bits, el_per_int, s](
                       const std::vector<array>& inputs) -> std::vector<array> {

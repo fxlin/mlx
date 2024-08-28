@@ -14,6 +14,9 @@
 
 namespace mlx::core {
 
+// Would be nice to fuse an elementwise op with GEMM or Conv
+// layers where possible.
+
 constexpr int max_compile_depth = 11;
 
 bool is_unary(const Primitive& p) {

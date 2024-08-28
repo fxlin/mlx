@@ -10,6 +10,8 @@
 #include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
 
+#include <iostream>
+
 namespace mlx::core {
 
 void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -40,12 +42,15 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto scales = ensure_row_contiguous(scales_pre);
   auto biases = ensure_row_contiguous(biases_pre);
 
+  // Let's do it without strides first then we can optimize
+
   int D = x.shape(-1);
   int B = x.size() / D;
   int O = out.shape(-1);
   if (transpose_) {
     // Route to the fast qmv kernel that has no bounds checking
     if (B < 6 && O % 8 == 0 && D % 512 == 0 && D >= 512) {
+      std::cout << "QMV fast" << std::endl;
       std::ostringstream kname;
       auto type_string = get_type_string(x.dtype());
       kname << "qmv_fast_" << type_string << "_gs_" << group_size_ << "_b_"
@@ -63,6 +68,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       MTL::Size group_dims = MTL::Size(bd, 2, 1);
       MTL::Size grid_dims = MTL::Size(O / bo, B, 1);
 
+      int w_stride = w.shape(-1) * w.shape(-2);
+
       compute_encoder.set_input_array(w, 0);
       compute_encoder.set_input_array(scales, 1);
       compute_encoder.set_input_array(biases, 2);
@@ -70,12 +77,14 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       compute_encoder.set_output_array(out, 4);
       compute_encoder->setBytes(&D, sizeof(int), 5);
       compute_encoder->setBytes(&O, sizeof(int), 6);
+      compute_encoder->setBytes(&w_stride, sizeof(int), 7);
 
       compute_encoder.dispatchThreadgroups(grid_dims, group_dims);
     }
 
     // Route to the qmv kernel
     else if (B < 6) {
+      std::cout << "QMV" << std::endl;
       std::ostringstream kname;
       auto type_string = get_type_string(x.dtype());
       kname << "qmv_" << type_string << "_gs_" << group_size_ << "_b_" << bits_;
@@ -92,6 +101,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       MTL::Size group_dims = MTL::Size(bd, 2, 1);
       MTL::Size grid_dims = MTL::Size((O + bo - 1) / bo, B, 1);
 
+      int w_stride = w.shape(-1) * w.shape(-2);
+
       compute_encoder.set_input_array(w, 0);
       compute_encoder.set_input_array(scales, 1);
       compute_encoder.set_input_array(biases, 2);
@@ -99,6 +110,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       compute_encoder.set_output_array(out, 4);
       compute_encoder->setBytes(&D, sizeof(int), 5);
       compute_encoder->setBytes(&O, sizeof(int), 6);
+      compute_encoder->setBytes(&w_stride, sizeof(int), 7);
 
       compute_encoder.dispatchThreadgroups(grid_dims, group_dims);
     }
@@ -143,6 +155,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       std::ostringstream kname;
       auto type_string = get_type_string(x.dtype());
       kname << "qvm_" << type_string << "_gs_" << group_size_ << "_b_" << bits_;
+      std::cout << "QVM" << std::endl;
 
       // Encode and dispatch kernel
       auto& compute_encoder = d.get_command_encoder(s.index);
@@ -156,6 +169,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       MTL::Size group_dims = MTL::Size(bd, 2, 1);
       MTL::Size grid_dims = MTL::Size(O / bo, B, 1);
 
+      int w_stride = w.shape(-1) * w.shape(-2);
+
       compute_encoder.set_input_array(x, 0);
       compute_encoder.set_input_array(w, 1);
       compute_encoder.set_input_array(scales, 2);
@@ -163,6 +178,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       compute_encoder.set_output_array(out, 4);
       compute_encoder->setBytes(&D, sizeof(int), 5);
       compute_encoder->setBytes(&O, sizeof(int), 6);
+      compute_encoder->setBytes(&w_stride, sizeof(int), 7);
 
       compute_encoder.dispatchThreadgroups(grid_dims, group_dims);
     }
