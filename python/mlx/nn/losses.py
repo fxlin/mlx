@@ -1,7 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
 import math
-from typing import Literal
+from typing import Literal, Optional
 
 import mlx.core as mx
 
@@ -22,7 +22,7 @@ def _reduce(loss: mx.array, reduction: Reduction = "none"):
 def cross_entropy(
     logits: mx.array,
     targets: mx.array,
-    weights: mx.array = None,
+    weights: Optional[mx.array] = None,
     axis: int = -1,
     label_smoothing: float = 0.0,
     reduction: Reduction = "none",
@@ -117,12 +117,17 @@ def cross_entropy(
 def binary_cross_entropy(
     inputs: mx.array,
     targets: mx.array,
-    weights: mx.array = None,
+    weights: Optional[mx.array] = None,
     with_logits: bool = True,
     reduction: Reduction = "mean",
 ) -> mx.array:
     """
     Computes the binary cross entropy loss.
+
+    By default, this function takes the pre-sigmoid logits, which results in a faster
+    and more precise loss. For improved numerical stability when ``with_logits=False``,
+    the loss calculation clips the input probabilities (in log-space) to a minimum value
+    of ``-100``.
 
     Args:
         inputs (array): The predicted values. If ``with_logits`` is ``True``, then
@@ -159,7 +164,9 @@ def binary_cross_entropy(
     if with_logits:
         loss = mx.logaddexp(0.0, inputs) - inputs * targets
     else:
-        loss = -(targets * mx.log(inputs) + (1 - targets) * mx.log(1 - inputs))
+        log_inputs_clip = mx.clip(mx.log(inputs), a_min=-100, a_max=None)
+        log_inputs_inv_clip = mx.clip(mx.log(1 - inputs), a_min=-100, a_max=None)
+        loss = -(targets * log_inputs_clip + (1 - targets) * log_inputs_inv_clip)
 
     # Apply weights if provided
     if weights is not None:
@@ -343,10 +350,9 @@ def smooth_l1_loss(
 
     .. math::
 
-      l =
-          \begin{cases}
-            0.5 (x - y)^2, & \text{ if } & (x - y) < \beta \\
-            |x - y| - 0.5 \beta, &  & \text{otherwise}
+      l = \begin{cases}
+            0.5 (x - y)^2, & \text{if } (x - y) < \beta \\
+            |x - y| - 0.5 \beta, & \text{otherwise}
           \end{cases}
 
     Args:

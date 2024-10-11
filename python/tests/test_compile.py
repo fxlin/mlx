@@ -382,7 +382,6 @@ class TestCompile(mlx_tests.MLXTestCase):
         self.assertFalse(mx.allclose(fun(), fun(), 1e-2, 1e-2))
 
     def test_compile_kwargs(self):
-
         @mx.compile
         def fun(x, y, z):
             return x + y + z
@@ -479,7 +478,6 @@ class TestCompile(mlx_tests.MLXTestCase):
         self.assertTrue(mx.array_equal(fun(x2), cfun(x2)))
 
     def test_compile_with_constant(self):
-
         # Test float
         @partial(mx.compile)
         def fun(x, y):
@@ -582,7 +580,6 @@ class TestCompile(mlx_tests.MLXTestCase):
         self.assertEqual(counter[0], 2)
 
     def test_compile_inf(self):
-
         @mx.compile
         def fun(x):
             return mx.isinf(x + 2)
@@ -591,7 +588,6 @@ class TestCompile(mlx_tests.MLXTestCase):
         self.assertEqual(out.item(), False)
 
     def test_unsupported_input_types(self):
-
         class MyClass:
             value = 1
 
@@ -604,6 +600,163 @@ class TestCompile(mlx_tests.MLXTestCase):
 
         with self.assertRaises(ValueError):
             out = fun(mx.array(0.0), y=MyClass())
+
+    def test_compile_create_list(self):
+        @mx.compile
+        def fun():
+            return [0.1 * mx.zeros((2,)), 0.1 * mx.zeros((2,))]
+
+        out = fun()
+        mx.eval(out)
+
+    def test_compile_vjp(self):
+        def fun(w):
+            w1 = w + w
+            w2 = w + w
+            return w @ w1 + w2 @ w2
+
+        def step(w):
+            out, grad = mx.vjp(fun, (w,), (mx.array([[1.0, 1.0], [1.0, 1.0]]),))
+            return out[0], grad[0]
+
+        w = mx.zeros((2, 2))
+        mx.eval(w)
+
+        expected = step(w)
+        out = mx.compile(step)(w)
+        self.assertTrue(mx.allclose(expected[0], out[0]))
+        self.assertTrue(mx.allclose(expected[1], out[1]))
+
+        def fun(w1, w2, x):
+            x = x @ w1
+            y = x @ w2
+            x = x + y * y
+            return (x * x).sum()
+
+        w1 = mx.zeros((4, 4))
+        w2 = mx.zeros((4, 4))
+        x = mx.zeros((4, 4))
+
+        def step(w1, w2, x):
+            loss, gradient = mx.value_and_grad(fun)(w1, w2, x)
+            w1 = w1 + gradient
+            return loss, w1
+
+        mx.eval(x, w1, w2)
+        expected = step(w1, w2, x)
+        out = mx.compile(step)(w1, w2, x)
+
+        self.assertTrue(mx.allclose(expected[0], out[0]))
+        self.assertTrue(mx.allclose(expected[1], out[1]))
+
+    def test_shapeless_mean(self):
+        def mean(x):
+            return mx.mean(x, keepdims=True)
+
+        cmean = mx.compile(mean, shapeless=True)
+
+        x = mx.ones(2)
+        out = cmean(x)
+        self.assertTrue(mx.allclose(out, mean(x)))
+
+        x = mx.ones(4)
+        out = cmean(x)
+        self.assertTrue(mx.allclose(out, mean(x)))
+
+        x = mx.ones(7)
+        out = cmean(x)
+        self.assertTrue(mx.allclose(out, mean(x)))
+
+    def test_compile_broadcast_only(self):
+        def fn(a):
+            a = mx.broadcast_to(a, (1,))
+            return a + a
+
+        out = mx.compile(fn)(mx.array(2.0))
+        # Make sure repr can be called
+        self.assertTrue(repr(out) is not None)
+        self.assertTrue(mx.array_equal(out, mx.array([4.0])))
+
+    def test_compile_with_long_name(self):
+        def fn(a, b):
+            for _ in range(10):
+                a = a - 1.0
+                b = b - 1.0
+            return a + b
+
+        out = mx.compile(fn)(mx.array(10.0), mx.array(20.0))
+        self.assertEqual(out.item(), 10.0)
+
+    def test_compile_multi_output(self):
+        def fn(x):
+            ys = [x]
+            for i in range(5):
+                ys.append(ys[-1] + x)
+            return ys, mx.sum(ys[-1])
+
+        x = mx.ones(1, dtype=mx.int32)
+        y1 = mx.compile(fn)(x)[1]
+        y2 = fn(x)[1]
+        self.assertEqual(y1.item(), y2.item())
+        self.assertEqual(y1.item(), 6)
+
+    def test_inf_constant(self):
+        def fn(x):
+            return mx.where(mx.isinf(x), 0, 1)
+
+        x = mx.array([0, float("inf"), 1], dtype=mx.bfloat16)
+        self.assertTrue(mx.array_equal(mx.compile(fn)(x), fn(x)))
+
+    def test_max_into_equal(self):
+        x = mx.random.uniform(shape=(1, 2, 2))
+        mx.eval(x)
+
+        def fn():
+            maxes = mx.max(x, axis=(1, 2), keepdims=True)
+            return x == maxes
+
+        out = mx.compile(fn)()
+        expected = fn()
+        self.assertTrue(mx.array_equal(expected, out))
+
+    def test_dtypes(self):
+        x = mx.array([0, 1, 2, 3])
+        dtypes = [mx.bool_, mx.int8, mx.uint8, mx.int16, mx.uint16]
+        for dtype in dtypes:
+            x = x.astype(dtype)
+            mx.eval(x)
+
+            def fn(x):
+                return x * 1 + 0
+
+            out = mx.compile(fn)(x)
+            expected = fn(x)
+            self.assertTrue(mx.array_equal(expected, out))
+
+    def test_compile_without_captured_inputs(self):
+        x = mx.array([1, 2, 3]) + 2
+
+        def fn(a):
+            y = x + 1
+            return a + y
+
+        with self.assertRaises(ValueError):
+            y = mx.compile(fn)(x)
+
+        x = mx.array([1.0, 2.0]) + mx.array([1.0, 2.0])
+        y = None
+
+        def fn(x):
+            nonlocal y
+            if y is None:
+                y = mx.array([1.0, 2.0])
+
+            y = y + x
+            return y
+
+        fn(x)
+        with self.assertRaises(ValueError):
+            y = mx.compile(fn)(x)
 
 
 if __name__ == "__main__":

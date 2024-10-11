@@ -6,7 +6,9 @@ from mlx.nn.layers.activations import (
     GELU,
     GLU,
     SELU,
+    HardShrink,
     Hardswish,
+    HardTanh,
     LeakyReLU,
     LogSigmoid,
     LogSoftmax,
@@ -17,6 +19,7 @@ from mlx.nn.layers.activations import (
     Sigmoid,
     SiLU,
     Softmax,
+    Softmin,
     Softplus,
     Softshrink,
     Softsign,
@@ -28,6 +31,8 @@ from mlx.nn.layers.activations import (
     gelu_approx,
     gelu_fast_approx,
     glu,
+    hard_shrink,
+    hard_tanh,
     hardswish,
     leaky_relu,
     log_sigmoid,
@@ -40,6 +45,7 @@ from mlx.nn.layers.activations import (
     sigmoid,
     silu,
     softmax,
+    softmin,
     softplus,
     softshrink,
     softsign,
@@ -48,7 +54,12 @@ from mlx.nn.layers.activations import (
 )
 from mlx.nn.layers.base import Module
 from mlx.nn.layers.containers import Sequential
-from mlx.nn.layers.convolution import Conv1d, Conv2d
+from mlx.nn.layers.convolution import Conv1d, Conv2d, Conv3d
+from mlx.nn.layers.convolution_transpose import (
+    ConvTranspose1d,
+    ConvTranspose2d,
+    ConvTranspose3d,
+)
 from mlx.nn.layers.dropout import Dropout, Dropout2d, Dropout3d
 from mlx.nn.layers.embedding import Embedding
 from mlx.nn.layers.linear import Bilinear, Identity, Linear
@@ -61,10 +72,13 @@ from mlx.nn.layers.normalization import (
 )
 from mlx.nn.layers.pooling import AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d
 from mlx.nn.layers.positional_encoding import ALiBi, RoPE, SinusoidalPositionalEncoding
-from mlx.nn.layers.quantized import QuantizedLinear
+from mlx.nn.layers.quantized import QuantizedEmbedding, QuantizedLinear, quantize
+from mlx.nn.layers.recurrent import GRU, LSTM, RNN
 from mlx.nn.layers.transformer import (
     MultiHeadAttention,
     Transformer,
+    TransformerDecoder,
+    TransformerDecoderLayer,
     TransformerEncoder,
     TransformerEncoderLayer,
 )

@@ -1,7 +1,7 @@
-// Copyright © 2023 Apple Inc.
-
+// Copyright © 2023-2024 Apple Inc.
 #include "mlx/backend/metal/allocator.h"
 #include "mlx/backend/metal/metal.h"
+#include "mlx/backend/metal/metal_impl.h"
 
 #include <mach/vm_page_size.h>
 #include <unistd.h>
@@ -23,16 +23,6 @@ void* Buffer::raw_ptr() {
 
 namespace metal {
 
-static bool cache_enabled_ = true;
-
-bool cache_enabled() {
-  return cache_enabled_;
-}
-
-void set_cache_enabled(bool enabled) {
-  cache_enabled_ = enabled;
-}
-
 namespace {
 
 BufferCache::BufferCache(MTL::Device* device)
@@ -44,7 +34,6 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::clear() {
-  std::lock_guard<std::mutex> lk(cache_mutex_);
   for (auto& [size, holder] : buffer_pool_) {
     if (holder->buf)
       holder->buf->release();
@@ -57,12 +46,9 @@ void BufferCache::clear() {
 }
 
 MTL::Buffer* BufferCache::reuse_from_cache(size_t size) {
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-
   // Find the closest buffer in pool
   MTL::Buffer* pbuf = nullptr;
 
-  // Make sure we use most of the available memory
   auto it = buffer_pool_.lower_bound(size);
 
   // Make sure we use most of the available memory
@@ -85,8 +71,6 @@ MTL::Buffer* BufferCache::reuse_from_cache(size_t size) {
 }
 
 void BufferCache::recycle_to_cache(MTL::Buffer* buf) {
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-
   // Add to cache
   if (buf) {
     BufferHolder* bh = new BufferHolder(buf);
@@ -100,7 +84,6 @@ void BufferCache::release_cached_buffers(size_t min_bytes_to_free) {
   if (min_bytes_to_free >= 0.9 * pool_size_) {
     clear();
   } else {
-    std::lock_guard<std::mutex> lk(cache_mutex_);
     size_t total_bytes_freed = 0;
 
     while (tail_ && (total_bytes_freed < min_bytes_to_free)) {
@@ -157,15 +140,43 @@ void BufferCache::remove_from_list(BufferCache::BufferHolder* to_remove) {
 
 MetalAllocator::MetalAllocator()
     : device_(device(mlx::core::Device::gpu).mtl_device()),
-      buffer_cache_(device_),
-      peak_allocated_size_(0),
-      block_limit_(1.5 * device_->recommendedMaxWorkingSetSize()),
-      gc_limit_(0.95 * device_->recommendedMaxWorkingSetSize()) {}
+      buffer_cache_(device_) {
+  auto memsize = std::get<size_t>(device_info()["memory_size"]);
+  block_limit_ =
+      std::min(1.5 * device_->recommendedMaxWorkingSetSize(), 0.95 * memsize);
+  gc_limit_ = std::min(
+      static_cast<size_t>(0.95 * device_->recommendedMaxWorkingSetSize()),
+      block_limit_);
+  max_pool_size_ = block_limit_;
+}
+
+size_t MetalAllocator::set_cache_limit(size_t limit) {
+  std::swap(limit, max_pool_size_);
+  return limit;
+};
+
+size_t MetalAllocator::set_memory_limit(size_t limit, bool relaxed) {
+  std::swap(limit, block_limit_);
+  relaxed_ = relaxed;
+  gc_limit_ = std::min(
+      block_limit_,
+      static_cast<size_t>(0.95 * device_->recommendedMaxWorkingSetSize()));
+  return limit;
+};
 
 Buffer MetalAllocator::malloc(size_t size, bool allow_swap /* = false */) {
   // Metal doesn't like empty buffers
   if (size == 0) {
     return Buffer{nullptr};
+  }
+
+  // More helpful message if maximum buffer length is exceeded
+  if (size > device_->maxBufferLength()) {
+    std::ostringstream msg;
+    msg << "Attempting to allocate " << size << " bytes which is greater than"
+        << " the maximum allowed buffer size of " << device_->maxBufferLength()
+        << " bytes.";
+    throw std::runtime_error(msg.str());
   }
 
   // Align up memory
@@ -174,48 +185,100 @@ Buffer MetalAllocator::malloc(size_t size, bool allow_swap /* = false */) {
   }
 
   // Try the cache
+  std::unique_lock lk(mutex_);
   MTL::Buffer* buf = buffer_cache_.reuse_from_cache(size);
-
   if (!buf) {
+    size_t mem_required = get_active_memory() + get_cache_memory() + size;
+
     // If there is too much memory pressure, fail (likely causes a wait).
-    if (!allow_swap && device_->currentAllocatedSize() + size >= block_limit_) {
+    if (!(allow_swap && relaxed_) && mem_required >= block_limit_) {
       return Buffer{nullptr};
     }
 
     auto thread_pool = metal::new_scoped_memory_pool();
 
-    // If we have a lot of memory pressure, check if we can reclaim some memory
-    // from the cache
-    if (device_->currentAllocatedSize() + size >= gc_limit_) {
-      size_t min_bytes_to_free =
-          size + device_->currentAllocatedSize() - gc_limit_;
-      buffer_cache_.release_cached_buffers(min_bytes_to_free);
+    // If we have a lot of memory pressure or are over the maximum cache size,
+    // try to reclaim memory from the cache
+    if (mem_required >= gc_limit_) {
+      buffer_cache_.release_cached_buffers(mem_required - gc_limit_);
     }
 
     // Allocate new buffer if needed
     size_t res_opt = MTL::ResourceStorageModeShared;
     res_opt |= MTL::ResourceHazardTrackingModeTracked;
+    lk.unlock();
     buf = device_->newBuffer(size, res_opt);
+    lk.lock();
   }
 
-  peak_allocated_size_ =
-      std::max(peak_allocated_size_, device_->currentAllocatedSize());
+  active_memory_ += buf->length();
+  peak_memory_ = std::max(peak_memory_, active_memory_);
+
+  // Maintain the cache below the requested limit
+  if (get_cache_memory() >= max_pool_size_) {
+    auto thread_pool = metal::new_scoped_memory_pool();
+    buffer_cache_.release_cached_buffers(get_cache_memory() - max_pool_size_);
+  }
 
   return Buffer{static_cast<void*>(buf)};
 }
 
+void MetalAllocator::clear_cache() {
+  std::unique_lock lk(mutex_);
+  buffer_cache_.clear();
+}
+
 void MetalAllocator::free(Buffer buffer) {
   auto buf = static_cast<MTL::Buffer*>(buffer.ptr());
-  if (cache_enabled()) {
+  std::unique_lock lk(mutex_);
+  active_memory_ -= buf->length();
+  if (get_cache_memory() < max_pool_size_) {
     buffer_cache_.recycle_to_cache(buf);
   } else {
+    lk.unlock();
+    auto thread_pool = metal::new_scoped_memory_pool();
     buf->release();
   }
 }
 
+size_t MetalAllocator::size(Buffer buffer) const {
+  return static_cast<MTL::Buffer*>(buffer.ptr())->length();
+}
+
 MetalAllocator& allocator() {
-  static MetalAllocator allocator_;
-  return allocator_;
+  // By creating the |allocator_| on heap, the destructor of MetalAllocator will
+  // not be called on exit and all the buffers will be leaked. This is necessary
+  // because releasing buffers can take more than 30sec when the program holds a
+  // lot of RAM (for example inferencing a LLM), and it would feel frozen to
+  // users when exiting.
+  // TODO(zcbenz): Consider using the `base::NoDestructor` class from Chromium
+  // when applying this pattern to more places, or when introducing sanitizers
+  // to MLX.
+  // https://source.chromium.org/chromium/chromium/src/+/main:base/no_destructor.h
+  static MetalAllocator* allocator_ = new MetalAllocator;
+  return *allocator_;
+}
+
+size_t set_cache_limit(size_t limit) {
+  return allocator().set_cache_limit(limit);
+}
+size_t set_memory_limit(size_t limit, bool relaxed /* = true */) {
+  return allocator().set_memory_limit(limit, relaxed);
+}
+size_t get_active_memory() {
+  return allocator().get_active_memory();
+}
+size_t get_peak_memory() {
+  return allocator().get_peak_memory();
+}
+void reset_peak_memory() {
+  allocator().reset_peak_memory();
+}
+size_t get_cache_memory() {
+  return allocator().get_cache_memory();
+}
+void clear_cache() {
+  return allocator().clear_cache();
 }
 
 } // namespace metal

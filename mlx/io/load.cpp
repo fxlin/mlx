@@ -1,5 +1,4 @@
-// Copyright © 2023 Apple Inc.
-
+// Copyright © 2023-2024 Apple Inc.
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -18,7 +17,7 @@ namespace mlx::core {
 
 namespace {
 
-static constexpr uint8_t MAGIC[] = {
+constexpr uint8_t MAGIC[] = {
     0x93,
     0x4e,
     0x55,
@@ -27,7 +26,7 @@ static constexpr uint8_t MAGIC[] = {
     0x59,
 };
 
-inline bool is_big_endian_() {
+inline bool is_big_endian() {
   union ByteOrder {
     int32_t i;
     uint8_t c[4];
@@ -35,6 +34,70 @@ inline bool is_big_endian_() {
   ByteOrder b = {0x01234567};
 
   return b.c[0] == 0x01;
+}
+
+// Array protocol typestring for Dtype
+std::string dtype_to_array_protocol(const Dtype& t) {
+  std::ostringstream r;
+  if (size_of(t) > 1) {
+    r << (is_big_endian() ? ">" : "<");
+  } else {
+    r << "|";
+  }
+  r << kindof(t) << (int)size_of(t);
+  return r.str();
+}
+
+// Dtype from array protocol type string
+Dtype dtype_from_array_protocol(std::string_view t) {
+  if (t.length() == 2 || t.length() == 3) {
+    std::string_view r = t.length() == 3 ? t.substr(1, 2) : t;
+
+    if (r == "V2") {
+      return bfloat16;
+    }
+
+    uint8_t size = r[1] - '0';
+
+    switch (r[0]) {
+      case 'b': {
+        if (size == 1)
+          return bool_;
+      }
+      case 'i': {
+        if (size == 1)
+          return int8;
+        else if (size == 2)
+          return int16;
+        else if (size == 4)
+          return int32;
+        else if (size == 8)
+          return int64;
+      }
+      case 'u': {
+        if (size == 1)
+          return uint8;
+        else if (size == 2)
+          return uint16;
+        else if (size == 4)
+          return uint32;
+        else if (size == 8)
+          return uint64;
+      }
+      case 'f': {
+        if (size == 2)
+          return float16;
+        else if (size == 4)
+          return float32;
+      }
+      case 'c': {
+        return complex64;
+      }
+    }
+  }
+
+  throw std::invalid_argument(
+      "[from_str] Invalid array protocol type-string: " + std::string(t));
 }
 
 } // namespace
@@ -74,8 +137,7 @@ void save(std::shared_ptr<io::Writer> out_stream, array a) {
   std::string fortran_order = a.flags().col_contiguous ? "True" : "False";
   std::ostringstream header;
   header << "{'descr': '" << dtype_to_array_protocol(a.dtype()) << "',"
-         << " 'fortran_order': " << fortran_order << ","
-         << " 'shape': (";
+         << " 'fortran_order': " << fortran_order << "," << " 'shape': (";
   for (auto i : a.shape()) {
     header << i << ", ";
   }
@@ -95,7 +157,7 @@ void save(std::shared_ptr<io::Writer> out_stream, array a) {
     uint16_t v1_header_len = header.tellp();
     const char* len_bytes = reinterpret_cast<const char*>(&v1_header_len);
 
-    if (!is_big_endian_()) {
+    if (!is_big_endian()) {
       magic_ver_len.write(len_bytes, 2);
     } else {
       magic_ver_len.write(len_bytes + 1, 1);
@@ -107,7 +169,7 @@ void save(std::shared_ptr<io::Writer> out_stream, array a) {
     uint32_t v2_header_len = header.tellp();
     const char* len_bytes = reinterpret_cast<const char*>(&v2_header_len);
 
-    if (!is_big_endian_()) {
+    if (!is_big_endian()) {
       magic_ver_len.write(len_bytes, 4);
     } else {
       magic_ver_len.write(len_bytes + 3, 1);
@@ -122,21 +184,16 @@ void save(std::shared_ptr<io::Writer> out_stream, array a) {
   out_stream->write(magic_ver_len.str().c_str(), magic_ver_len.str().length());
   out_stream->write(header.str().c_str(), header.str().length());
   out_stream->write(a.data<char>(), a.nbytes());
-
-  return;
 }
 
 /** Save array to file in .npy format */
-void save(const std::string& file_, array a) {
-  // Open and check file
-  std::string file = file_;
-
+void save(std::string file, array a) {
   // Add .npy to file name if it is not there
   if (file.length() < 4 || file.substr(file.length() - 4, 4) != ".npy")
     file += ".npy";
 
   // Serialize array
-  save(std::make_shared<io::FileWriter>(file), a);
+  save(std::make_shared<io::FileWriter>(std::move(file)), a);
 }
 
 /** Load array from reader in .npy format */
@@ -222,7 +279,7 @@ array load(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s) {
   // Build primitive
 
   size_t offset = 8 + header_len_size + header.length();
-  bool swap_endianness = read_is_big_endian != is_big_endian_();
+  bool swap_endianness = read_is_big_endian != is_big_endian();
 
   if (col_contiguous) {
     std::reverse(shape.begin(), shape.end());
@@ -230,7 +287,7 @@ array load(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s) {
   auto loaded_array = array(
       shape,
       dtype,
-      std::make_unique<Load>(to_stream(s), in_stream, offset, swap_endianness),
+      std::make_shared<Load>(to_stream(s), in_stream, offset, swap_endianness),
       std::vector<array>{});
   if (col_contiguous) {
     loaded_array = transpose(loaded_array, s);
@@ -240,8 +297,66 @@ array load(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s) {
 }
 
 /** Load array from file in .npy format */
-array load(const std::string& file, StreamOrDevice s) {
-  return load(std::make_shared<io::FileReader>(file), s);
+array load(std::string file, StreamOrDevice s) {
+  return load(std::make_shared<io::ParallelFileReader>(std::move(file)), s);
 }
+
+namespace io {
+
+ThreadPool& thread_pool() {
+  static ThreadPool pool_{4};
+  return pool_;
+}
+
+ThreadPool ParallelFileReader::thread_pool_{4};
+
+void ParallelFileReader::read(char* data, size_t n) {
+  while (n != 0) {
+    auto m = ::read(fd_, data, std::min(n, static_cast<size_t>(INT32_MAX)));
+    if (m <= 0) {
+      std::ostringstream msg;
+      msg << "[read] Unable to read " << n << " bytes from file.";
+      throw std::runtime_error(msg.str());
+    }
+    data += m;
+    n -= m;
+  }
+}
+
+void ParallelFileReader::read(char* data, size_t n, size_t offset) {
+  auto readfn = [fd = fd_](size_t offset, size_t size, char* buffer) -> bool {
+    while (size != 0) {
+      auto m = pread(fd, buffer, size, offset);
+      if (m <= 0) {
+        return false;
+      }
+      buffer += m;
+      size -= m;
+    }
+    return true;
+  };
+  std::vector<std::future<bool>> futs;
+  while (n != 0) {
+    if (n < batch_size_) {
+      if (!readfn(offset, n, data)) {
+        throw std::runtime_error("[read] Unable to read from file.");
+      }
+      break;
+    } else {
+      size_t m = batch_size_;
+      futs.emplace_back(thread_pool_.enqueue(readfn, offset, m, data));
+      data += m;
+      n -= m;
+      offset += m;
+    }
+  }
+  for (auto& f : futs) {
+    if (!f.get()) {
+      throw std::runtime_error("[read] Unable to read from file.");
+    }
+  }
+}
+
+} // namespace io
 
 } // namespace mlx::core

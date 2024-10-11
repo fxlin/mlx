@@ -1,5 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 
+#pragma once
+
 namespace mlx::core::detail {
 
 std::pair<std::vector<array>, std::vector<array>> vmap_trace(
@@ -18,12 +20,16 @@ std::vector<array> vmap_replace(
 // idea.
 std::function<std::vector<array>(const std::vector<array>&)> compile(
     const std::function<std::vector<array>(const std::vector<array>&)>& fun,
-    size_t fun_id,
+    std::uintptr_t fun_id,
     bool shapeless = false,
     std::vector<uint64_t> constants = {});
 
 // Erase cached compile functions
-void compile_erase(size_t fun_id);
+void compile_erase(std::uintptr_t fun_id);
+
+// Clear the compiler cache causing a recompilation of all compiled functions
+// when called again.
+void compile_clear_cache();
 
 // Create an InTracing object during tracing operations to signify to the rest
 // of the codebase that we are during tracing so evals should not throw away
@@ -37,6 +43,22 @@ struct InTracing {
   }
 
   static bool in_tracing() {
+    return tracing_counter > 0;
+  }
+
+ private:
+  static int tracing_counter;
+};
+
+struct RetainGraph {
+  RetainGraph() {
+    tracing_counter++;
+  }
+  ~RetainGraph() {
+    tracing_counter--;
+  }
+
+  static bool retain_graph() {
     return tracing_counter > 0;
   }
 

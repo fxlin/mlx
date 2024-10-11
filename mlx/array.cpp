@@ -1,5 +1,4 @@
 // Copyright © 2023-2024 Apple Inc.
-
 #include <functional>
 
 #include "mlx/array.h"
@@ -12,20 +11,14 @@ namespace mlx::core {
 
 namespace {
 
-std::pair<size_t, std::vector<size_t>> cum_prod(const std::vector<int>& shape) {
-  std::vector<size_t> strides(shape.size());
-  size_t cum_prod = 1;
-  for (int i = shape.size() - 1; i >= 0; --i) {
-    strides[i] = cum_prod;
-    cum_prod *= shape[i];
-  }
-  return {cum_prod, strides};
-}
-
 /** Return true if we are currently performing a function transformation in
  * order to keep the graph when evaluating tracer arrays. */
 bool in_tracing() {
   return detail::InTracing::in_tracing();
+}
+
+bool retain_graph() {
+  return detail::RetainGraph::retain_graph();
 }
 
 } // namespace
@@ -37,21 +30,10 @@ array::array(const std::complex<float>& val, Dtype dtype /* = complex64 */)
 }
 
 array::array(
-    const std::vector<int>& shape,
-    Dtype dtype,
-    std::shared_ptr<Primitive> primitive,
-    const std::vector<array>& inputs)
-    : array_desc_(std::make_shared<ArrayDesc>(
-          shape,
-          dtype,
-          std::move(primitive),
-          inputs)) {}
-
-array::array(
     std::vector<int> shape,
     Dtype dtype,
     std::shared_ptr<Primitive> primitive,
-    std::vector<array>&& inputs)
+    std::vector<array> inputs)
     : array_desc_(std::make_shared<ArrayDesc>(
           std::move(shape),
           dtype,
@@ -59,15 +41,16 @@ array::array(
           std::move(inputs))) {}
 
 std::vector<array> array::make_arrays(
-    const std::vector<std::vector<int>>& shapes,
+    std::vector<std::vector<int>> shapes,
     const std::vector<Dtype>& dtypes,
-    std::shared_ptr<Primitive> primitive,
+    const std::shared_ptr<Primitive>& primitive,
     const std::vector<array>& inputs) {
   std::vector<array> outputs;
-  for (int i = 0; i < shapes.size(); ++i) {
-    outputs.push_back(array(shapes[i], dtypes[i], primitive, inputs));
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    outputs.emplace_back(std::move(shapes[i]), dtypes[i], primitive, inputs);
   }
-  for (int i = 0; i < outputs.size(); ++i) {
+  // For each node in |outputs|, its siblings are the other nodes.
+  for (size_t i = 0; i < outputs.size(); ++i) {
     auto siblings = outputs;
     siblings.erase(siblings.begin() + i);
     outputs[i].set_siblings(std::move(siblings), i);
@@ -92,10 +75,10 @@ array::array(std::initializer_list<int> data, Dtype dtype)
 /* Build an array from a shared buffer */
 array::array(
     allocator::Buffer data,
-    const std::vector<int>& shape,
+    std::vector<int> shape,
     Dtype dtype,
     deleter_t deleter)
-    : array_desc_(std::make_shared<ArrayDesc>(shape, dtype)) {
+    : array_desc_(std::make_shared<ArrayDesc>(std::move(shape), dtype)) {
   set_data(data, deleter);
 }
 
@@ -104,22 +87,42 @@ void array::detach() {
     s.array_desc_->inputs.clear();
     s.array_desc_->siblings.clear();
     s.array_desc_->position = 0;
-    s.array_desc_->depth = 0;
     s.array_desc_->primitive = nullptr;
   }
   array_desc_->inputs.clear();
   array_desc_->siblings.clear();
   array_desc_->position = 0;
-  array_desc_->depth = 0;
   array_desc_->primitive = nullptr;
 }
 
+bool array::is_available() const {
+  if (status() == Status::available) {
+    return true;
+  } else if (status() == Status::evaluated && event().is_signaled()) {
+    set_status(Status::available);
+    return true;
+  }
+  return false;
+}
+
+void array::wait() {
+  if (!is_available()) {
+    event().wait();
+    set_status(Status::available);
+  }
+}
+
 void array::eval() {
-  mlx::core::eval({*this});
+  // Ensure the array is ready to be read
+  if (status() == Status::unscheduled) {
+    mlx::core::eval({*this});
+  } else {
+    wait();
+  }
 }
 
 bool array::is_tracer() const {
-  return array_desc_->is_tracer && in_tracing();
+  return array_desc_->is_tracer && in_tracing() || retain_graph();
 }
 
 void array::set_data(allocator::Buffer buffer, deleter_t d) {
@@ -164,51 +167,127 @@ void array::copy_shared_buffer(const array& other) {
   copy_shared_buffer(other, other.strides(), other.flags(), other.data_size());
 }
 
-void array::move_shared_buffer(array other) {
+void array::move_shared_buffer(
+    array other,
+    const std::vector<size_t>& strides,
+    Flags flags,
+    size_t data_size,
+    size_t offset /* = 0 */) {
   array_desc_->data = std::move(other.array_desc_->data);
-  array_desc_->strides = other.strides();
-  array_desc_->flags = other.flags();
-  array_desc_->data_size = other.data_size();
-  array_desc_->data_ptr = other.array_desc_->data_ptr;
+  array_desc_->strides = strides;
+  array_desc_->flags = flags;
+  array_desc_->data_size = data_size;
+  auto char_offset = sizeof(char) * itemsize() * offset;
+  array_desc_->data_ptr = static_cast<void*>(
+      static_cast<char*>(other.array_desc_->data_ptr) + char_offset);
 }
 
-array::ArrayDesc::ArrayDesc(const std::vector<int>& shape, Dtype dtype)
-    : shape(shape), dtype(dtype) {
-  std::tie(size, strides) = cum_prod(shape);
+void array::move_shared_buffer(array other) {
+  move_shared_buffer(other, other.strides(), other.flags(), other.data_size());
 }
 
-array::ArrayDesc::ArrayDesc(
-    const std::vector<int>& shape,
-    Dtype dtype,
-    std::shared_ptr<Primitive> primitive,
-    const std::vector<array>& inputs)
-    : shape(shape),
-      dtype(dtype),
-      primitive(std::move(primitive)),
-      inputs(inputs) {
-  std::tie(size, strides) = cum_prod(this->shape);
-  for (auto& in : this->inputs) {
-    is_tracer |= in.is_tracer();
-    depth = std::max(in.graph_depth(), depth);
+array::~array() {
+  if (array_desc_ == nullptr) {
+    return;
   }
-  depth++;
+
+  // Ignore arrays that might be detached during eval
+  if (status() == array::Status::scheduled) {
+    return;
+  }
+
+  // Break circular reference for non-detached arrays with siblings
+  if (auto n = siblings().size(); n > 0) {
+    bool do_detach = true;
+    // If all siblings have siblings.size() references except
+    // the one we are currently destroying (which has siblings.size() + 1)
+    // then there are no more external references
+    do_detach &= (array_desc_.use_count() == (n + 1));
+    for (auto& s : siblings()) {
+      do_detach &= (s.array_desc_.use_count() == n);
+      if (!do_detach) {
+        break;
+      }
+    }
+    if (do_detach) {
+      for (auto& s : siblings()) {
+        for (auto& ss : s.siblings()) {
+          ss.array_desc_ = nullptr;
+        }
+        s.array_desc_->siblings.clear();
+      }
+    }
+  }
+}
+
+void array::ArrayDesc::init() {
+  strides.resize(shape.size());
+  size = 1;
+  for (int i = shape.size() - 1; i >= 0; --i) {
+    strides[i] = size;
+    size *= shape[i];
+  }
+  for (const auto& in : inputs) {
+    is_tracer |= in.is_tracer();
+  }
+}
+
+array::ArrayDesc::ArrayDesc(std::vector<int> shape, Dtype dtype)
+    : shape(std::move(shape)), dtype(dtype), status(Status::available) {
+  init();
 }
 
 array::ArrayDesc::ArrayDesc(
-    std::vector<int>&& shape,
+    std::vector<int> shape,
     Dtype dtype,
     std::shared_ptr<Primitive> primitive,
-    std::vector<array>&& inputs)
+    std::vector<array> inputs)
     : shape(std::move(shape)),
       dtype(dtype),
+      status(Status::unscheduled),
       primitive(std::move(primitive)),
       inputs(std::move(inputs)) {
-  std::tie(size, strides) = cum_prod(this->shape);
-  for (auto& in : this->inputs) {
-    is_tracer |= in.is_tracer();
-    depth = std::max(in.graph_depth(), depth);
+  init();
+}
+
+array::ArrayDesc::~ArrayDesc() {
+  // When an array description is destroyed it will delete a bunch of arrays
+  // that may also destroy their corresponding descriptions and so on and so
+  // forth.
+  //
+  // This calls recursively the destructor and can result in stack overflow, we
+  // instead put them in a vector and destroy them one at a time resulting in a
+  // max stack depth of 2.
+  if (inputs.empty()) {
+    return;
   }
-  depth++;
+
+  std::vector<std::shared_ptr<ArrayDesc>> for_deletion;
+
+  auto append_deletable_inputs = [&for_deletion](ArrayDesc& ad) {
+    std::unordered_map<std::uintptr_t, array> input_map;
+    for (array& a : ad.inputs) {
+      if (a.array_desc_) {
+        input_map.insert({a.id(), a});
+      }
+    }
+    ad.inputs.clear();
+    for (auto& [_, a] : input_map) {
+      if (a.array_desc_.use_count() <= a.siblings().size() + 1) {
+        for_deletion.push_back(std::move(a.array_desc_));
+      }
+    }
+  };
+
+  append_deletable_inputs(*this);
+
+  while (!for_deletion.empty()) {
+    // top is going to be deleted at the end of the block *after* the arrays
+    // with inputs have been moved into the vector
+    auto top = std::move(for_deletion.back());
+    for_deletion.pop_back();
+    append_deletable_inputs(*top);
+  }
 }
 
 array::ArrayIterator::ArrayIterator(const array& arr, int idx)

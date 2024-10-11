@@ -163,15 +163,14 @@ def gelu_approx(x):
     See :func:`gelu` for the exact computation.
 
     This function approximates ``gelu`` with a maximum absolute error :math:`<
-    0.0003` in the range :math:`[-6, 6]` using the following
+    0.0005` in the range :math:`[-6, 6]` using the following
 
     .. math::
 
-        x = x \sigma\left(1.60033 x \left(1 + 0.0433603 x^2\right)\right)
+        x = 0.5 * x * \left(1 + \text{Tanh}\left((\sqrt{2 / \pi} * \left(x + 0.044715 * x^3\right)\right)\right)
 
-    where :math:`\sigma(\cdot)` is the logistic sigmoid.
     """
-    return x * mx.sigmoid(1.60033 * x * (1 + 0.0433603 * x.square()))
+    return 0.5 * x * (1 + mx.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * x**3)))
 
 
 @partial(mx.compile, shapeless=True)
@@ -287,6 +286,38 @@ def hardswish(x):
     return x * mx.minimum(max_x_3, 6) / 6
 
 
+@partial(mx.compile, shapeless=True)
+def hard_tanh(x, min_val=-1.0, max_val=1.0):
+    r"""Applies the HardTanh function.
+
+    Applies :math:`\max(\min(x, \text{max\_val}), \text{min\_val})` element-wise.
+    """
+    return mx.minimum(mx.maximum(x, min_val), max_val)
+
+
+@partial(mx.compile, shapeless=True)
+def hard_shrink(x, lambd=0.5):
+    r"""Applies the HardShrink activation function.
+
+    .. math::
+        \text{hardshrink}(x) = \begin{cases}
+        x & \text{if } x > \lambda \\
+        x & \text{if } x < -\lambda \\
+        0 & \text{otherwise}
+        \end{cases}
+    """
+    return mx.where(mx.abs(x) > lambd, x, 0)
+
+
+@partial(mx.compile, shapeless=True)
+def softmin(x, axis=-1):
+    r"""Applies the Softmin function.
+
+    Applies :math:`\frac{e^{-x_i}}{\sum_j e^{-x_j}}` element-wise.
+    """
+    return mx.softmax(-x, axis=axis)
+
+
 def tanh(x):
     """Applies the hyperbolic tangent function.
 
@@ -316,7 +347,7 @@ class GLU(Module):
         return glu(x=x, axis=self.axis)
 
 
-@_make_activation_module(mx.sigmoid)
+@_make_activation_module(sigmoid)
 class Sigmoid(Module):
     r"""Applies the sigmoid function, element-wise.
 
@@ -504,13 +535,18 @@ class GELU(Module):
     However, if ``approx`` is set to 'precise' or 'fast' it applies
 
     .. math::
-        \textrm{GELUApprox}(x) &= x * \sigma\left(1.60033 * x \left(1 + 0.0433603 * x^2\right)\right) \\
-        \textrm{GELUFast}(x) &= x * \sigma\left(1.773 * x\right)
+        \textrm{GELUApprox}(x) &= 0.5 * x * \left(1 + \text{Tanh}\left((\sqrt{2 / \pi} * \left(x + 0.044715 * x^3\right)\right)\right) \\
+        \textrm{GELUFast}(x) &= x * \sigma\left(1.702 * x\right)
 
     respectively.
 
+    .. note::
+       For compatibility with the PyTorch API, 'tanh' can be used as an alias
+       for 'precise'.
+
     See :func:`gelu`, :func:`gelu_approx` and :func:`gelu_fast_approx` for the
     functional equivalents and information regarding error bounds.
+    
 
     Args:
         approx ('none' | 'precise' | 'fast'): Which approximation to gelu to use if any.
@@ -521,13 +557,13 @@ class GELU(Module):
 
         if approx == "none":
             self._act = gelu
-        elif approx == "precise":
+        elif approx == "precise" or approx == "tanh":
             self._act = gelu_approx
         elif approx == "fast":
             self._act = gelu_fast_approx
         else:
             raise ValueError(
-                f"The approximation should be in ['none', 'precise', 'fast'] but '{approx}' was given"
+                f"The approximation should be in ['none', 'precise', 'tanh', 'fast'] but '{approx}' was given"
             )
 
     def __call__(self, x):
@@ -579,4 +615,31 @@ class SELU(Module):
     r"""Applies the Scaled Exponential Linear Unit.
 
     See :func:`selu` for the functional equivalent.
+    """
+
+
+@_make_activation_module(hard_tanh)
+class HardTanh(Module):
+    r"""Applies the HardTanh function.
+
+    See :func:`hard_tanh` for the functional equivalent.
+    """
+
+
+@_make_activation_module(hard_shrink)
+class HardShrink(Module):
+    r"""Applies the HardShrink function.
+
+    See :func:`hard_shrink` for the functional equivalent.
+
+    Args:
+        lambd: the :math:`\lambda` value for Hardshrink. Default: ``0.5``
+    """
+
+
+@_make_activation_module(softmin)
+class Softmin(Module):
+    r"""Applies the Softmin function.
+
+    See :func:`softmin` for the functional equivalent.
     """

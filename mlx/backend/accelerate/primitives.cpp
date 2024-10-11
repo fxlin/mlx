@@ -3,8 +3,7 @@
 #include <cassert>
 #include <cmath>
 
-#include <vecLib/vDSP.h>
-#include <vecLib/vForce.h>
+#include <Accelerate/Accelerate.h>
 
 #include "mlx/allocator.h"
 #include "mlx/backend/common/binary.h"
@@ -31,21 +30,27 @@ DEFAULT(ArgPartition)
 DEFAULT(ArgReduce)
 DEFAULT(ArgSort)
 DEFAULT(AsStrided)
+DEFAULT(BlockMaskedMM)
 DEFAULT(Broadcast)
 DEFAULT(Ceil)
 DEFAULT(Concatenate)
+DEFAULT(Conjugate)
 DEFAULT(Copy)
-DEFAULT_MULTI(CustomVJP)
+DEFAULT_MULTI(CustomTransforms)
 DEFAULT_MULTI(Depends)
 DEFAULT_MULTI(DivMod)
+DEFAULT(NumberOfElements)
 DEFAULT(Equal)
 DEFAULT(Erf)
 DEFAULT(ErfInv)
 DEFAULT(FFT)
 DEFAULT(Floor)
 DEFAULT(Gather)
+DEFAULT(GatherMM)
+DEFAULT(GatherQMM)
 DEFAULT(Greater)
 DEFAULT(GreaterEqual)
+DEFAULT(Hadamard)
 DEFAULT(Less)
 DEFAULT(LessEqual)
 DEFAULT(Load)
@@ -68,10 +73,14 @@ DEFAULT(Select)
 DEFAULT(Sigmoid)
 DEFAULT(Sign)
 DEFAULT(Slice)
+DEFAULT(SliceUpdate)
 DEFAULT_MULTI(Split)
 DEFAULT(Sort)
 DEFAULT(StopGradient)
+DEFAULT_MULTI(SVD)
 DEFAULT(Transpose)
+DEFAULT(Inverse)
+DEFAULT(Cholesky)
 
 void Abs::eval_cpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
@@ -93,7 +102,7 @@ void Add::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto& b = inputs[1];
 
   if (a.dtype() == float32) {
-    binary(
+    binary_op<float>(
         a,
         b,
         out,
@@ -108,7 +117,7 @@ void Add::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vadd((const float*)a, 1, (const float*)b, 1, (float*)o, 1, n);
         });
   } else if (a.dtype() == int32) {
-    binary(
+    binary_op<int>(
         a,
         b,
         out,
@@ -123,7 +132,7 @@ void Add::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vaddi((const int*)a, 1, (const int*)b, 1, (int*)o, 1, n);
         });
   } else {
-    binary(a, b, out, [](auto x, auto y) { return x + y; });
+    eval(inputs, out);
   }
 }
 
@@ -182,6 +191,26 @@ void ArcTan::eval_cpu(const std::vector<array>& inputs, array& out) {
     set_unary_output_data(in, out);
     int size = in.data_size();
     vvatanf(out.data<float>(), in.data<float>(), &size);
+  } else {
+    eval(inputs, out);
+  }
+}
+
+void ArcTan2::eval_cpu(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 2);
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  if (out.dtype() == float32 && a.flags().row_contiguous &&
+      b.flags().row_contiguous) {
+    if (a.is_donatable()) {
+      out.copy_shared_buffer(a);
+    } else if (b.is_donatable()) {
+      out.copy_shared_buffer(b);
+    } else {
+      out.set_data(allocator::malloc_or_wait(out.nbytes()));
+    }
+    int size = a.data_size();
+    vvatan2f(out.data<float>(), a.data<float>(), b.data<float>(), &size);
   } else {
     eval(inputs, out);
   }
@@ -258,7 +287,7 @@ void Divide::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto& b = inputs[1];
 
   if (a.dtype() == int32) {
-    binary(
+    binary_op<int>(
         a,
         b,
         out,
@@ -271,7 +300,7 @@ void Divide::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vdivi((const int*)b, 1, (const int*)a, 1, (int*)o, 1, n);
         });
   } else if (a.dtype() == float32) {
-    binary(
+    binary_op<float>(
         a,
         b,
         out,
@@ -286,7 +315,7 @@ void Divide::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vdiv((const float*)b, 1, (const float*)a, 1, (float*)o, 1, n);
         });
   } else {
-    binary(a, b, out, [](auto x, auto y) { return x / y; });
+    eval(inputs, out);
   }
 }
 
@@ -297,12 +326,21 @@ void Exp::eval_cpu(const std::vector<array>& inputs, array& out) {
     set_unary_output_data(in, out);
     auto size = in.data_size();
     vvexpf(out.data<float>(), in.data<float>(), reinterpret_cast<int*>(&size));
-  } else if (is_floating_point(out.dtype())) {
-    unary_fp(in, out, [](auto x) { return std::exp(x); });
   } else {
-    throw std::invalid_argument(
-        "[exp] Cannot exponentiate elements in array"
-        " with non floating point type.");
+    eval(inputs, out);
+  }
+}
+
+void Expm1::eval_cpu(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 1);
+  const auto& in = inputs[0];
+  if (out.dtype() == float32 && in.flags().contiguous) {
+    set_unary_output_data(in, out);
+    auto size = in.data_size();
+    vvexpm1f(
+        out.data<float>(), in.data<float>(), reinterpret_cast<int*>(&size));
+  } else {
+    eval(inputs, out);
   }
 }
 
@@ -351,12 +389,8 @@ void Log1p::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto size = in.data_size();
     vvlog1pf(
         out.data<float>(), in.data<float>(), reinterpret_cast<int*>(&size));
-  } else if (is_floating_point(out.dtype())) {
-    unary_fp(in, out, [](auto x) { return std::log1p(x); });
   } else {
-    throw std::invalid_argument(
-        "[log1p] Cannot compute log of elements in array with"
-        " non floating point type.");
+    eval(inputs, out);
   }
 }
 
@@ -366,7 +400,7 @@ void Multiply::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto& b = inputs[1];
 
   if (a.dtype() == float32) {
-    binary(
+    binary_op<float>(
         a,
         b,
         out,
@@ -381,7 +415,7 @@ void Multiply::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vmul((const float*)a, 1, (const float*)b, 1, (float*)o, 1, n);
         });
   } else {
-    binary(a, b, out, [](auto x, auto y) { return x * y; });
+    eval(inputs, out);
   }
 }
 
@@ -392,7 +426,7 @@ void Negative::eval_cpu(const std::vector<array>& inputs, array& out) {
     set_unary_output_data(in, out);
     vDSP_vneg(in.data<float>(), 1, out.data<float>(), 1, in.data_size());
   } else {
-    unary(in, out, [](auto x) { return -x; });
+    eval(inputs, out);
   }
 }
 
@@ -479,7 +513,7 @@ void Square::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto size = in.data_size();
     vDSP_vsq(in.data<float>(), 1, out.data<float>(), 1, size);
   } else {
-    unary(in, out, [](auto x) { return x * x; });
+    eval(inputs, out);
   }
 }
 
@@ -505,7 +539,7 @@ void Subtract::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto& b = inputs[1];
 
   if (a.dtype() == float32) {
-    binary(
+    binary_op<float>(
         a,
         b,
         out,
@@ -523,7 +557,7 @@ void Subtract::eval_cpu(const std::vector<array>& inputs, array& out) {
           vDSP_vsub((const float*)b, 1, (const float*)a, 1, (float*)o, 1, n);
         });
   } else if (a.dtype() == int32) {
-    binary(
+    binary_op<int>(
         a,
         b,
         out,
@@ -535,7 +569,7 @@ void Subtract::eval_cpu(const std::vector<array>& inputs, array& out) {
         },
         UseDefaultBinaryOp());
   } else {
-    binary(a, b, out, [](auto x, auto y) { return x - y; });
+    eval(inputs, out);
   }
 }
 

@@ -17,14 +17,13 @@
             << std::setprecision(5) << time_fn(FUNC, ##__VA_ARGS__) << " msec" \
             << std::endl;
 
-#define TIMEM(MSG, FUNC, ...)                                                  \
-  std::cout << "Timing "                                                       \
-            << "(" << MSG << ") " << #FUNC << " ... " << std::flush            \
-            << std::setprecision(5) << time_fn(FUNC, ##__VA_ARGS__) << " msec" \
-            << std::endl;
+#define TIMEM(MSG, FUNC, ...)                                      \
+  std::cout << "Timing " << "(" << MSG << ") " << #FUNC << " ... " \
+            << std::flush << std::setprecision(5)                  \
+            << time_fn(FUNC, ##__VA_ARGS__) << " msec" << std::endl;
 
 template <typename F, typename... Args>
-double time_fn(F fn, Args... args) {
+double time_fn(F fn, Args&&... args) {
   // warmup
   for (int i = 0; i < 5; ++i) {
     eval(fn(std::forward<Args>(args)...));

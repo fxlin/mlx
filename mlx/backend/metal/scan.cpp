@@ -5,6 +5,7 @@
 
 #include "mlx/backend/metal/copy.h"
 #include "mlx/backend/metal/device.h"
+#include "mlx/backend/metal/kernels.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/primitives.h"
 
@@ -28,83 +29,67 @@ void Scan::eval_gpu(const std::vector<array>& inputs, array& out) {
     in = arr_copy;
   }
 
-  std::ostringstream kname;
-  if (in.strides()[axis_] == 1) {
-    kname << "contiguous_scan_";
-    if (reverse_) {
-      kname << "reverse_";
-    }
-    kname << ((inclusive_) ? "inclusive_" : "exclusive_");
-    switch (reduce_type_) {
-      case Scan::Sum:
-        kname << "sum_";
-        break;
-      case Scan::Prod:
-        kname << "prod_";
-        break;
-      case Scan::Max:
-        kname << "max_";
-        break;
-      case Scan::Min:
-        kname << "min_";
-        break;
-    }
-    kname << type_to_name(in) << "_" << type_to_name(out);
+  bool contiguous = in.strides()[axis_] == 1;
 
-    auto kernel = d.get_kernel(kname.str());
-    auto compute_encoder = d.get_command_encoder(s.index);
+  std::ostringstream kname;
+  kname << (contiguous ? "contig_" : "strided_");
+  kname << "scan_";
+  if (reverse_) {
+    kname << "reverse_";
+  }
+  kname << ((inclusive_) ? "inclusive_" : "exclusive_");
+
+  std::string reduce_type;
+  switch (reduce_type_) {
+    case Scan::Sum:
+      reduce_type = "sum";
+      break;
+    case Scan::Prod:
+      reduce_type = "prod";
+      break;
+    case Scan::Max:
+      reduce_type = "max";
+      break;
+    case Scan::Min:
+      reduce_type = "min";
+      break;
+  }
+  kname << reduce_type << "_" << type_to_name(in) << "_" << type_to_name(out);
+  auto kernel = get_scan_kernel(
+      d, kname.str(), reverse_, inclusive_, reduce_type, in, out);
+
+  if (contiguous) {
+    auto& compute_encoder = d.get_command_encoder(s.index);
     compute_encoder->setComputePipelineState(kernel);
-    set_array_buffer(compute_encoder, in, 0);
-    set_array_buffer(compute_encoder, out, 1);
+    compute_encoder.set_input_array(in, 0);
+    compute_encoder.set_output_array(out, 1);
     size_t size = in.shape(axis_);
     compute_encoder->setBytes(&size, sizeof(size_t), 2);
 
     // Compute the thread grid
     int n_reads = (in.itemsize() <= 4) ? 4 : 2;
-    int elements_per_simd = n_reads * 32;
+    constexpr int simd_size = 32;
+    int elements_per_simd = n_reads * simd_size;
     int thread_groups = in.size() / size;
     int thread_group_size = kernel->maxTotalThreadsPerThreadgroup();
-    if (size < n_reads * 1024) {
-      thread_group_size = ((size + elements_per_simd - 1) / elements_per_simd) *
-          elements_per_simd;
-    } else if (size < n_reads * 2048) {
+    if (size <= n_reads * 1024) {
       thread_group_size =
-          ((size / 2 + elements_per_simd - 1) / elements_per_simd) *
-          elements_per_simd;
+          ((size + elements_per_simd - 1) / elements_per_simd) * simd_size;
+    } else if (size <= n_reads * 2048) {
+      thread_group_size =
+          ((size / 2 + elements_per_simd - 1) / elements_per_simd) * simd_size;
     }
     thread_group_size = std::min(
         thread_group_size,
         static_cast<int>(kernel->maxTotalThreadsPerThreadgroup()));
     MTL::Size grid_dims = MTL::Size(thread_groups * thread_group_size, 1, 1);
     MTL::Size group_dims = MTL::Size(thread_group_size, 1, 1);
-    compute_encoder->dispatchThreads(grid_dims, group_dims);
+    compute_encoder.dispatchThreads(grid_dims, group_dims);
   } else {
-    kname << "strided_scan_";
-    if (reverse_) {
-      kname << "reverse_";
-    }
-    kname << ((inclusive_) ? "inclusive_" : "exclusive_");
-    switch (reduce_type_) {
-      case Scan::Sum:
-        kname << "sum_";
-        break;
-      case Scan::Prod:
-        kname << "prod_";
-        break;
-      case Scan::Max:
-        kname << "max_";
-        break;
-      case Scan::Min:
-        kname << "min_";
-        break;
-    }
-    kname << type_to_name(in) << "_" << type_to_name(out);
-
-    auto kernel = d.get_kernel(kname.str());
-    auto compute_encoder = d.get_command_encoder(s.index);
+    auto& compute_encoder = d.get_command_encoder(s.index);
     compute_encoder->setComputePipelineState(kernel);
-    set_array_buffer(compute_encoder, in, 0);
-    set_array_buffer(compute_encoder, out, 1);
+    compute_encoder.set_input_array(in, 0);
+    compute_encoder.set_output_array(out, 1);
     size_t size = in.shape(axis_);
     size_t stride = in.strides()[axis_];
     compute_encoder->setBytes(&size, sizeof(size_t), 2);
@@ -119,13 +104,15 @@ void Scan::eval_gpu(const std::vector<array>& inputs, array& out) {
     int grid_x = (stride + elements_per_tile_x - 1) / elements_per_tile_x;
     MTL::Size grid_dims = MTL::Size(grid_x * tile_x, grid_y * tile_y, 1);
     MTL::Size group_dims = MTL::Size(tile_x, tile_y, 1);
-    compute_encoder->dispatchThreads(grid_dims, group_dims);
+    compute_encoder.dispatchThreads(grid_dims, group_dims);
   }
 
-  if (copies.size() > 0) {
+  if (!copies.empty()) {
     auto command_buffer = d.get_command_buffer(s.index);
     command_buffer->addCompletedHandler(
-        [copies](MTL::CommandBuffer*) mutable { copies.clear(); });
+        [copies = std::move(copies)](MTL::CommandBuffer*) mutable {
+          copies.clear();
+        });
   }
 }
 

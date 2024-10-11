@@ -7,6 +7,7 @@
 
 #include "mlx/array.h"
 #include "mlx/stream.h"
+#include "mlx/utils.h"
 
 namespace mlx::core::random {
 
@@ -121,6 +122,15 @@ inline array normal(
   return normal(shape, float32, 0.0, 1.0, key, s);
 }
 
+/** Generate samples from a multivariate normal distribution. **/
+array multivariate_normal(
+    const array& mean,
+    const array& cov,
+    const std::vector<int>& shape,
+    Dtype dtype,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {});
+
 /** Generate integer samples uniformly at random */
 array randint(
     const array& low,
@@ -139,7 +149,7 @@ array randint(
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {}) {
   return randint(array(low), array(high), shape, dtype, key, to_stream(s));
-};
+}
 
 /** Generate binary variables with probability to be true equal to p */
 array bernoulli(
@@ -158,7 +168,7 @@ array bernoulli(
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {}) {
   return bernoulli(array(p), key, s);
-};
+}
 
 template <typename T>
 array bernoulli(
@@ -167,7 +177,7 @@ array bernoulli(
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {}) {
   return bernoulli(array(p), shape, key, s);
-};
+}
 
 array bernoulli(
     const std::optional<array>& key = std::nullopt,
@@ -211,6 +221,49 @@ array categorical(
 array categorical(
     const array& logits,
     int axis = -1,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {});
+
+/** Generate samples from the laplace distribution. */
+array laplace(
+    const std::vector<int>& shape,
+    Dtype dtype,
+    const float loc,
+    const float scale,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {});
+inline array laplace(
+    const std::vector<int>& shape,
+    const float loc,
+    const float scale,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {}) {
+  return laplace(shape, float32, loc, scale, key, s);
+}
+inline array laplace(
+    const std::vector<int>& shape,
+    const Dtype dtype,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {}) {
+  return laplace(shape, dtype, 0.0, 1.0, key, s);
+}
+inline array laplace(
+    const std::vector<int>& shape,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {}) {
+  return laplace(shape, float32, 0.0, 1.0, key, s);
+}
+
+/* Randomly permute the elements of x along the given axis. */
+array permutation(
+    const array& x,
+    int axis = 0,
+    const std::optional<array>& key = std::nullopt,
+    StreamOrDevice s = {});
+
+/* A random permutation of `arange(x)` */
+array permutation(
+    int x,
     const std::optional<array>& key = std::nullopt,
     StreamOrDevice s = {});
 

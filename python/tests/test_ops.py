@@ -3,7 +3,7 @@
 import math
 import os
 import unittest
-from itertools import permutations
+from itertools import permutations, product
 
 import mlx.core as mx
 import mlx_tests
@@ -374,6 +374,16 @@ class TestOps(mlx_tests.MLXTestCase):
         result = mx.isinf(x)
         self.assertEqual(result.tolist(), [False, False, False])
 
+    def test_isfinite(self):
+        x = mx.array([0.0, float("inf"), float("nan")])
+        self.assertEqual(mx.isfinite(x).tolist(), [True, False, False])
+
+        x = x.astype(mx.float16)
+        self.assertEqual(mx.isfinite(x).tolist(), [True, False, False])
+
+        x = x.astype(mx.bfloat16)
+        self.assertEqual(mx.isfinite(x).tolist(), [True, False, False])
+
     def test_tri(self):
         for shape in [[4], [4, 4], [2, 10]]:
             for diag in [-1, 0, 1, -2]:
@@ -590,6 +600,18 @@ class TestOps(mlx_tests.MLXTestCase):
             self.assertListEqual(list(sum_npy.shape), list(sum_mlx.shape))
             self.assertTrue(np.all(sum_npy == sum_mlx))
 
+        x_npy = (
+            np.arange(3 * 2 * 3 * 3 * 3 * 3)
+            .reshape(3, 2, 3, 3, 3, 3)
+            .astype(np.float32)
+        )
+        x_mlx = mx.array(x_npy)
+
+        y_mlx = x_mlx.sum(axis=(0, 1, 3, 4, 5))
+        y_npy = x_npy.sum(axis=(0, 1, 3, 4, 5))
+
+        self.assertTrue(np.array_equal(y_mlx, y_npy))
+
     def test_prod(self):
         x = mx.array(
             [
@@ -713,6 +735,11 @@ class TestOps(mlx_tests.MLXTestCase):
         out = mx.var(x, ddof=3)
         self.assertEqual(out.item(), float("inf"))
 
+    def test_std(self):
+        x = mx.random.uniform(shape=(5, 5))
+        x_np = np.array(x)
+        self.assertAlmostEqual(mx.std(x).item(), x_np.std().item(), places=6)
+
     def test_abs(self):
         a = mx.array([-1.0, 1.0, -2.0, 3.0])
         result = mx.abs(a)
@@ -731,6 +758,15 @@ class TestOps(mlx_tests.MLXTestCase):
         a = mx.array([-1.0, 1.0, 0.0, -2.0, 3.0])
         result = mx.sign(a)
         expected = np.sign(a, dtype=np.float32)
+        self.assertTrue(np.allclose(result, expected))
+
+        a = mx.array([-1.0, 1.0, 0.0, -2.0, 3.0])
+        b = mx.array([-4.0, -3.0, 1.0, 0.0, 3.0])
+        c = a + b * 1j
+        result = mx.sign(c)
+        # np.sign differs in NumPy 1 and 2 so
+        # we manually implement the NumPy 2 version here.
+        expected = c / np.abs(c)
         self.assertTrue(np.allclose(result, expected))
 
     def test_logical_not(self):
@@ -827,6 +863,14 @@ class TestOps(mlx_tests.MLXTestCase):
 
         self.assertTrue(np.allclose(result, expected))
 
+    def test_expm1(self):
+        a = mx.array([-88, -87, 0, 0.5, -0.5, 5, 87, 88, 89, 90])
+        result = mx.expm1(a)
+        errs = np.seterr(over="ignore")
+        expected = np.expm1(a)
+        np.seterr(over=errs["over"])
+        self.assertTrue(np.allclose(result, expected, rtol=1e-3, atol=1e-4))
+
     def test_erf(self):
         inputs = [-5, 0.0, 0.5, 1.0, 2.0, 10.0]
         x = mx.array(inputs)
@@ -866,6 +910,22 @@ class TestOps(mlx_tests.MLXTestCase):
         )
         result = mx.cos(a)
         expected = np.cos(a, dtype=np.float32)
+
+        self.assertTrue(np.allclose(result, expected))
+
+    def test_degrees(self):
+        a = mx.array(
+            [0, math.pi / 4, math.pi / 2, math.pi, 3 * math.pi / 4, 2 * math.pi]
+        )
+        result = mx.degrees(a)
+        expected = np.degrees(a, dtype=np.float32)
+
+        self.assertTrue(np.allclose(result, expected))
+
+    def test_radians(self):
+        a = mx.array([0.0, 45.0, 90.0, 180.0, 270.0, 360.0])
+        result = mx.radians(a)
+        expected = np.radians(a, dtype=np.float32)
 
         self.assertTrue(np.allclose(result, expected))
 
@@ -999,6 +1059,13 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(a_npy_taken.shape, a_mlx_taken.shape)
         self.assertListEqual(a_npy_taken.tolist(), a_mlx_taken.tolist())
 
+        # Take with integer index
+        a = mx.arange(8).reshape(2, 4)
+        out = mx.take(a, 1, axis=0)
+        self.assertTrue(mx.array_equal(out, mx.array([4, 5, 6, 7])))
+        out = mx.take(a, 1, axis=1)
+        self.assertTrue(mx.array_equal(out, mx.array([1, 5])))
+
     def test_take_along_axis(self):
         a_np = np.arange(8).reshape(2, 2, 2)
         a_mlx = mx.array(a_np)
@@ -1014,6 +1081,31 @@ class TestOps(mlx_tests.MLXTestCase):
             out_np = np.take_along_axis(a_np, idx_np.reshape(shape), axis=ax)
             out_mlx = mx.take_along_axis(a_mlx, mx.reshape(idx_mlx, shape), axis=ax)
             self.assertTrue(np.array_equal(out_np, np.array(out_mlx)))
+
+    def test_put_along_axis(self):
+        for ax in [None, 0, 1, 2]:
+
+            a_np = np.arange(16).reshape(2, 2, 4).astype(np.int32)
+            a_mlx = mx.array(a_np)
+
+            if ax == None:
+                idx_np = np.random.randint(low=0, high=a_np.size, size=(16,))
+                values_np = np.random.randint(low=0, high=100, size=(16,))
+            else:
+                shape = list(a_np.shape)
+                shape[ax] = 2
+                idx_np = np.random.randint(low=0, high=a_np.shape[ax], size=shape)
+                values_np = np.random.randint(low=0, high=100, size=shape)
+
+            idx_np.astype(np.int32)
+            values_np.astype(a_np.dtype)
+
+            idx_mlx = mx.array(idx_np)
+            values_mlx = mx.array(values_np)
+
+            np.put_along_axis(a_np, idx_np, values_np, axis=ax)
+            out_mlx = mx.put_along_axis(a_mlx, idx_mlx, values_mlx, axis=ax)
+            self.assertTrue(np.array_equal(a_np, out_mlx))
 
     def test_split(self):
         a = mx.array([1, 2, 3])
@@ -1177,6 +1269,55 @@ class TestOps(mlx_tests.MLXTestCase):
                         y_ = mx.array(x_)
                         test_ops(getattr(np, op), getattr(mx, op), x_, y_, atol)
 
+    def test_unary_ops_from_non_array(self):
+        unary_ops = [
+            "abs",
+            "exp",
+            "log",
+            "square",
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "sign",
+            "negative",
+            "expm1",
+            "arcsin",
+            "arccos",
+            "arctan",
+            "arcsinh",
+            "arctanh",
+            "degrees",
+            "radians",
+            "log2",
+            "log10",
+            "log1p",
+            "floor",
+            "ceil",
+            "conjugate",
+        ]
+
+        x = 0.5
+        x_np = np.random.rand(10).astype(np.float32)
+        for op in unary_ops:
+            with self.subTest(op=op):
+                # Test from scalar
+                expected = getattr(np, op)(x)
+                out = getattr(mx, op)(x)
+
+                # Check close
+                self.assertTrue(np.allclose(expected, out, equal_nan=True))
+
+                # Test from NumPy
+                expected = getattr(np, op)(x_np)
+                out = getattr(mx, op)(x_np)
+
+                # Check close
+                self.assertTrue(np.allclose(expected, np.array(out), equal_nan=True))
+
     def test_trig_ops(self):
         def test_ops(npop, mlxop, x, y, atol):
             r_np = npop(x)
@@ -1233,6 +1374,7 @@ class TestOps(mlx_tests.MLXTestCase):
             "arcsin": lambda primal, cotan: cotan / np.sqrt(1.0 - primal**2),
             "arccos": lambda primal, cotan: -cotan / np.sqrt(1.0 - primal**2),
             "arctan": lambda primal, cotan: cotan / (1.0 + primal**2),
+            "arctan2": lambda primal, cotan: cotan / (1.0 + primal**2),
             "arcsinh": lambda primal, cotan: cotan / np.sqrt(primal**2 + 1),
             "arccosh": lambda primal, cotan: cotan / np.sqrt(primal**2 - 1),
             "arctanh": lambda primal, cotan: cotan / (1.0 - primal**2),
@@ -1416,7 +1558,19 @@ class TestOps(mlx_tests.MLXTestCase):
         # Sliced inputs
         y = mx.random.uniform(shape=(8, 4))
         out = mx.softmax(y[:, 0:2], axis=-1)
-        self.assertAlmostEqual(out.sum().item(), 8.0)
+        self.assertAlmostEqual(out.sum().item(), 8.0, 5)
+
+        # Precise
+        for t in [mx.float16, mx.bfloat16]:
+            a = (10 * mx.random.normal(shape=(1024,))).astype(t)
+            out_expect = mx.softmax(a.astype(mx.float32)).astype(t)
+            out = mx.softmax(a, axis=-1, precise=True)
+            self.assertTrue(mx.allclose(out_expect, out))
+
+        # All Infs give NaNs
+        for n in [127, 128, 129]:
+            x = mx.full((n,), vals=-float("inf"))
+            self.assertTrue(mx.all(mx.isnan(mx.softmax(x))))
 
     def test_concatenate(self):
         a_npy = np.random.randn(32, 32, 32)
@@ -1436,6 +1590,75 @@ class TestOps(mlx_tests.MLXTestCase):
             b = mx.array([1, 2])
             mx.concatenate([a, b], axis=0)
 
+        # Cocnatenate with 0-sized array
+        a = mx.zeros((2, 0, 2))
+        b = mx.zeros((2, 2, 2))
+        out = mx.concatenate([a, b], axis=1)
+        self.assertTrue(mx.array_equal(out, b))
+
+    def test_meshgrid(self):
+        x = mx.array([1, 2, 3], dtype=mx.int32)
+        y = np.array([1, 2, 3], dtype=np.int32)
+
+        # Test single input
+        a_mlx = mx.meshgrid(x)
+        a_np = np.meshgrid(y)
+        self.assertEqualArray(a_mlx[0], mx.array(a_np[0]))
+
+        # Test sparse
+        a_mlx, b_mlx, c_mlx = mx.meshgrid(x, x, x, sparse=True)
+        a_np, b_np, c_np = np.meshgrid(y, y, y, sparse=True)
+        self.assertEqualArray(a_mlx, mx.array(a_np))
+        self.assertEqualArray(b_mlx, mx.array(b_np))
+        self.assertEqualArray(c_mlx, mx.array(c_np))
+
+        # Test different lengths
+        x = mx.array([1, 2], dtype=mx.int32)
+        y = mx.array([1, 2, 3], dtype=mx.int32)
+        z = np.array([1, 2], dtype=np.int32)
+        w = np.array([1, 2, 3], dtype=np.int32)
+        a_mlx, b_mlx = mx.meshgrid(x, y)
+        a_np, b_np = np.meshgrid(z, w)
+        self.assertEqualArray(a_mlx, mx.array(a_np))
+        self.assertEqualArray(b_mlx, mx.array(b_np))
+
+        # Test empty input
+        x = mx.array([], dtype=mx.int32)
+        y = np.array([], dtype=np.int32)
+        a_mlx = mx.meshgrid(x)
+        a_np = np.meshgrid(y)
+        self.assertEqualArray(a_mlx[0], mx.array(a_np[0]))
+
+        # Test float32 input
+        x = mx.array([1.1, 2.2, 3.3], dtype=mx.float32)
+        y = np.array([1.1, 2.2, 3.3], dtype=np.float32)
+        a_mlx = mx.meshgrid(x, x, x)
+        a_np = np.meshgrid(y, y, y)
+        self.assertEqualArray(a_mlx[0], mx.array(a_np[0]))
+        self.assertEqualArray(a_mlx[1], mx.array(a_np[1]))
+        self.assertEqualArray(a_mlx[2], mx.array(a_np[2]))
+
+        # Test ij indexing
+        x = mx.array([1.1, 2.2, 3.3, 4.4, 5.5], dtype=mx.float32)
+        y = np.array([1.1, 2.2, 3.3, 4.4, 5.5], dtype=np.float32)
+        a_mlx = mx.meshgrid(x, x, indexing="ij")
+        a_np = np.meshgrid(y, y, indexing="ij")
+        self.assertEqualArray(a_mlx[0], mx.array(a_np[0]))
+        self.assertEqualArray(a_mlx[1], mx.array(a_np[1]))
+
+        # Test different lengths, sparse, and ij indexing
+        a = mx.array([1, 2], dtype=mx.int64)
+        b = mx.array([1, 2, 3], dtype=mx.int64)
+        c = mx.array([1, 2, 3, 4], dtype=mx.int64)
+        x = np.array([1, 2], dtype=np.int64)
+        y = np.array([1, 2, 3], dtype=np.int64)
+        z = np.array([1, 2, 3, 4], dtype=np.int64)
+        a_mlx, b_mlx, c_mlx = mx.meshgrid(a, b, c, sparse=True, indexing="ij")
+        a_np, b_np, c_np = np.meshgrid(x, y, z, sparse=True, indexing="ij")
+        self.assertEqualArray(a_mlx, mx.array(a_np))
+        self.assertEqualArray(b_mlx, mx.array(b_np))
+        self.assertEqualArray(c_mlx, mx.array(c_np))
+
     def test_pad(self):
         pad_width_and_values = [
             ([(1, 1), (1, 1), (1, 1)], 0),
@@ -1452,6 +1675,12 @@ class TestOps(mlx_tests.MLXTestCase):
 
                 b_npy = np.pad(a_npy, pw, constant_values=v)
                 b_mlx = mx.pad(a_mlx, pw, constant_values=v)
+
+                self.assertEqual(list(b_npy.shape), list(b_mlx.shape))
+                self.assertTrue(np.allclose(b_npy, b_mlx, atol=1e-6))
+
+                b_npy = np.pad(a_npy, pw, mode="edge")
+                b_mlx = mx.pad(a_mlx, pw, mode="edge")
 
                 self.assertEqual(list(b_npy.shape), list(b_mlx.shape))
                 self.assertTrue(np.allclose(b_npy, b_mlx, atol=1e-6))
@@ -1486,6 +1715,23 @@ class TestOps(mlx_tests.MLXTestCase):
             np.where,
         )
 
+    def test_nan_to_num(self):
+        a = mx.array([6, float("inf"), 2, 0])
+        out_mx = mx.nan_to_num(a)
+        out_np = np.nan_to_num(a)
+        self.assertTrue(np.allclose(out_mx, out_np))
+
+        for t in [mx.float32, mx.float16]:
+            a = mx.array([float("inf"), 6.9, float("nan"), float("-inf")])
+            out_mx = mx.nan_to_num(a)
+            out_np = np.nan_to_num(a)
+            self.assertTrue(np.allclose(out_mx, out_np))
+
+            a = mx.array([float("inf"), 6.9, float("nan"), float("-inf")]).astype(t)
+            out_np = np.nan_to_num(a, nan=0.0, posinf=1000, neginf=-1000)
+            out_mx = mx.nan_to_num(a, nan=0.0, posinf=1000, neginf=-1000)
+            self.assertTrue(np.allclose(out_mx, out_np))
+
     def test_as_strided(self):
         x_npy = np.random.randn(128).astype(np.float32)
         x_mlx = mx.array(x_npy)
@@ -1512,7 +1758,9 @@ class TestOps(mlx_tests.MLXTestCase):
                 c_mlx = mxop(a_mlx, axis=axis)
                 self.assertTrue(np.allclose(c_npy, c_mlx, rtol=1e-3, atol=1e-3))
 
+        a_mlx = mx.random.randint(shape=(32, 32, 32), low=-100, high=100)
         for op in ["cumsum", "cumprod", "cummax", "cummin"]:
+            mxop = getattr(mx, op)
             c1 = mxop(a_mlx, axis=2)
             c2 = mxop(a_mlx, axis=2, inclusive=False, reverse=False)
             self.assertTrue(mx.array_equal(c1[:, :, :-1], c2[:, :, 1:]))
@@ -1545,6 +1793,27 @@ class TestOps(mlx_tests.MLXTestCase):
             c2 = mxop(a_mlx, axis=0, inclusive=False, reverse=True)[:-1, :, :]
             self.assertTrue(mx.array_equal(c1, c2))
 
+        a = mx.random.uniform(shape=(8, 32))
+        mat = mx.tri(32)
+        for t in [mx.float16, mx.bfloat16]:
+            a_t = a.astype(t)
+            mat_t = mat.astype(t)
+            out = mx.cumsum(a_t, axis=-1)
+            expected = (mat_t * a_t[:, None, :]).sum(axis=-1)
+            self.assertTrue(mx.allclose(out, expected, rtol=0.02, atol=1e-3))
+        sizes = [1023, 1024, 1025, 2047, 2048, 2049]
+        for s in sizes:
+            a = mx.ones((s,), mx.int32)
+            out = mx.cumsum(a)
+            expected = mx.arange(1, s + 1, dtype=mx.int32)
+            self.assertTrue(mx.array_equal(expected, out))
+
+            # non-contiguous scan
+            a = mx.ones((s, 2), mx.int32)
+            out = mx.cumsum(a, axis=0)
+            expected = mx.repeat(expected[:, None], 2, axis=1)
+            self.assertTrue(mx.array_equal(expected, out))
+
     def test_squeeze_expand(self):
         a = mx.zeros((2, 1, 2, 1))
         self.assertEqual(mx.squeeze(a).shape, (2, 2))
@@ -1562,34 +1831,108 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(mx.expand_dims(a, [0, -1]).shape, (1, 2, 2, 1))
 
     def test_sort(self):
-        shape = (3, 4, 5)
-        for dtype in ("int32", "float32"):
-            for axis in (None, 0, 1, 2):
-                with self.subTest(dtype=dtype, axis=axis):
-                    np.random.seed(0)
-                    np_dtype = getattr(np, dtype)
-                    a_np = np.random.uniform(0, 100, size=shape).astype(np_dtype)
-                    a_mx = mx.array(a_np)
+        shape = (6, 4, 10)
+        tests = product(
+            ("int32", "float32"),  # type
+            (None, 0, 1, 2),  # axis
+            (True, False),  # strided
+        )
+        for dtype, axis, strided in tests:
+            with self.subTest(dtype=dtype, axis=axis, strided=strided):
+                np.random.seed(0)
+                np_dtype = getattr(np, dtype)
+                a_np = np.random.uniform(0, 100, size=shape).astype(np_dtype)
+                a_mx = mx.array(a_np)
+                if strided:
+                    a_mx = a_mx[::2, :, ::2]
+                    a_np = a_np[::2, :, ::2]
 
-                    b_np = np.sort(a_np, axis=axis)
-                    b_mx = mx.sort(a_mx, axis=axis)
+                b_np = np.sort(a_np, axis=axis)
+                b_mx = mx.sort(a_mx, axis=axis)
 
-                    self.assertTrue(np.array_equal(b_np, b_mx))
-                    self.assertEqual(b_mx.dtype, a_mx.dtype)
+                self.assertTrue(np.array_equal(b_np, b_mx))
+                self.assertEqual(b_mx.dtype, a_mx.dtype)
 
-                    c_np = np.argsort(a_np, axis=axis)
-                    c_mx = mx.argsort(a_mx, axis=axis)
-                    d_np = np.take_along_axis(a_np, c_np, axis=axis)
-                    d_mx = mx.take_along_axis(a_mx, c_mx, axis=axis)
+                c_np = np.argsort(a_np, axis=axis)
+                c_mx = mx.argsort(a_mx, axis=axis)
+                d_np = np.take_along_axis(a_np, c_np, axis=axis)
+                d_mx = mx.take_along_axis(a_mx, c_mx, axis=axis)
 
-                    self.assertTrue(np.array_equal(d_np, d_mx))
-                    self.assertEqual(c_mx.dtype, mx.uint32)
+                self.assertTrue(np.array_equal(d_np, d_mx))
+                self.assertEqual(c_mx.dtype, mx.uint32)
+
+        # Set random seed
+        np.random.seed(0)
+
+        # Test multi-block sort
+        for strided in (False, True):
+            with self.subTest(strided=strided):
+                a_np = np.random.normal(size=(32769,)).astype(np.float32)
+                a_mx = mx.array(a_np)
+
+                if strided:
+                    a_mx = a_mx[::3]
+                    a_np = a_np[::3]
+
+                b_np = np.sort(a_np)
+                b_mx = mx.sort(a_mx)
+
+                self.assertTrue(np.array_equal(b_np, b_mx))
+                self.assertEqual(b_mx.dtype, a_mx.dtype)
+
+                # Test multi-dum multi-block sort
+                a_np = np.random.normal(size=(2, 4, 32769)).astype(np.float32)
+                a_mx = mx.array(a_np)
+
+                if strided:
+                    a_mx = a_mx[..., ::3]
+                    a_np = a_np[..., ::3]
+
+                b_np = np.sort(a_np, axis=-1)
+                b_mx = mx.sort(a_mx, axis=-1)
+
+                self.assertTrue(np.array_equal(b_np, b_mx))
+                self.assertEqual(b_mx.dtype, a_mx.dtype)
+
+                a_np = np.random.normal(size=(2, 32769, 4)).astype(np.float32)
+                a_mx = mx.array(a_np)
+
+                if strided:
+                    a_mx = a_mx[:, ::3]
+                    a_np = a_np[:, ::3]
+
+                b_np = np.sort(a_np, axis=1)
+                b_mx = mx.sort(a_mx, axis=1)
+
+                self.assertTrue(np.array_equal(b_np, b_mx))
+                self.assertEqual(b_mx.dtype, a_mx.dtype)
+
+        # test 0 strides
+        a_np = np.array([1, 0, 2, 1, 3, 0, 4, 0])
+        a_mx = mx.array(a_np)
+        b_np = np.broadcast_to(a_np, (16, 8))
+        b_mx = mx.broadcast_to(a_mx, (16, 8))
+        mx.eval(b_mx)
+        for axis in (0, 1):
+            c_np = np.sort(b_np, axis=axis)
+            c_mx = mx.sort(b_mx, axis=axis)
+            self.assertTrue(np.array_equal(c_np, c_mx))
+            self.assertEqual(b_mx.dtype, c_mx.dtype)
+
+        # Test very large array
+        if mx.default_device() == mx.gpu:
+            a_np = np.random.normal(20, 20, size=(2**22)).astype(np.float32)
+            a_mx = mx.array(a_np)
+
+            b_np = np.sort(a_np)
+            b_mx = mx.sort(a_mx)
+            self.assertTrue(np.array_equal(b_np, b_mx))
 
     def test_partition(self):
         shape = (3, 4, 5)
         for dtype in ("int32", "float32"):
             for axis in (None, 0, 1, 2):
-                for kth in (-2, 2):
+                for kth in (-2, 0, 2):
                     with self.subTest(dtype=dtype, axis=axis, kth=kth):
                         np.random.seed(0)
                         np_dtype = getattr(np, dtype)
@@ -1605,13 +1948,27 @@ class TestOps(mlx_tests.MLXTestCase):
                         self.assertTrue(np.array_equal(c_np, c_mx))
                         self.assertEqual(b_mx.dtype, a_mx.dtype)
 
-                        top_k_mx = mx.topk(a_mx, kth, axis=axis)
-                        self.assertTrue(np.all(c_np <= top_k_mx))
-                        self.assertEqual(top_k_mx.dtype, a_mx.dtype)
-
                         if kth >= 0:
-                            d_np = np.take(b_mx, np.arange(kth), axis=axis)
-                            self.assertTrue(np.all(d_np <= c_mx))
+                            top_k_mx = mx.topk(a_mx, kth, axis=axis)
+                            top_k_np = np.take(
+                                np.partition(a_np, -kth, axis=axis), (-kth,), axis=axis
+                            )
+                            self.assertTrue(np.all(top_k_np <= top_k_mx))
+                            self.assertEqual(top_k_mx.dtype, a_mx.dtype)
+                            N = a_mx.shape[axis] if axis is not None else a_mx.size
+                            M = top_k_mx.shape[axis or 0]
+                            self.assertEqual(M, (kth + N) % N)
+
+    def test_argpartition(self):
+        x = mx.broadcast_to(mx.array([1, 2, 3]), (2, 3))
+        out = mx.argpartition(x, kth=1, axis=0)
+        expected = mx.array([[0, 0, 0], [1, 1, 1]])
+        self.assertTrue(mx.array_equal(out, expected))
+
+        x = mx.array([[1, 2], [3, 4]]).T
+        out = mx.argpartition(x, kth=1, axis=0)
+        expected = mx.array([[0, 0], [1, 1]])
+        self.assertTrue(mx.array_equal(out, expected))
 
     @unittest.skipIf(
         os.getenv("LOW_MEMORY", None) is not None,
@@ -1699,13 +2056,29 @@ class TestOps(mlx_tests.MLXTestCase):
         clipped = mx.clip(mx.array(a), mx.array(mins), mx.array(maxs))
         self.assertTrue(np.array_equal(clipped, expected))
 
+        # Check clip output types
+        a = mx.array([1, 2, 3], mx.int16)
+        out_t = mx.clip(a, a_min=0, a_max=5).dtype
+        self.assertEqual(out_t, mx.int16)
+
+        out_t = mx.clip(a, a_min=0.0, a_max=5).dtype
+        self.assertEqual(out_t, mx.float32)
+
+        a = mx.array([1, 2, 3], mx.float16)
+        out_t = mx.clip(a, a_min=0.0, a_max=5).dtype
+        self.assertEqual(out_t, mx.float16)
+
+        a = mx.array([1, 2, 3], mx.float16)
+        out_t = mx.clip(a, a_min=0.0, a_max=mx.array(1.0)).dtype
+        self.assertEqual(out_t, mx.float32)
+
     def test_linspace(self):
         # Test default num = 50
         a = mx.linspace(0, 1)
         expected = mx.array(np.linspace(0, 1))
         self.assertEqualArray(a, expected)
 
-        # Test int32 dtype
+        # Test int64 dtype
         b = mx.linspace(0, 10, 5, mx.int64)
         expected = mx.array(np.linspace(0, 10, 5, dtype=int))
         self.assertEqualArray(b, expected)
@@ -1747,8 +2120,8 @@ class TestOps(mlx_tests.MLXTestCase):
         )
 
     def test_tensordot(self):
-        # No fp16 matmuls on linux
-        if self.is_linux:
+        # No fp16 matmuls on common cpu backend
+        if not self.is_apple_silicon:
             dtypes = [mx.float32]
         else:
             dtypes = [mx.float16, mx.float32]
@@ -1909,6 +2282,38 @@ class TestOps(mlx_tests.MLXTestCase):
         expected = mx.array(np.diag(x, k=-1))
         self.assertTrue(mx.array_equal(result, expected))
 
+    def test_trace(self):
+        a_mx = mx.arange(9, dtype=mx.int64).reshape((3, 3))
+        a_np = np.arange(9, dtype=np.int64).reshape((3, 3))
+
+        # Test 2D array
+        result = mx.trace(a_mx)
+        expected = np.trace(a_np)
+        self.assertEqualArray(result, mx.array(expected))
+
+        # Test dtype
+        result = mx.trace(a_mx, dtype=mx.float16)
+        expected = np.trace(a_np, dtype=np.float16)
+        self.assertEqualArray(result, mx.array(expected))
+
+        # Test offset
+        result = mx.trace(a_mx, offset=1)
+        expected = np.trace(a_np, offset=1)
+        self.assertEqualArray(result, mx.array(expected))
+
+        # Test axis1 and axis2
+        b_mx = mx.arange(27, dtype=mx.int64).reshape(3, 3, 3)
+        b_np = np.arange(27, dtype=np.int64).reshape(3, 3, 3)
+
+        result = mx.trace(b_mx, axis1=1, axis2=2)
+        expected = np.trace(b_np, axis1=1, axis2=2)
+        self.assertEqualArray(result, mx.array(expected))
+
+        # Test offset, axis1, axis2, and dtype
+        result = mx.trace(b_mx, offset=1, axis1=1, axis2=2, dtype=mx.float32)
+        expected = np.trace(b_np, offset=1, axis1=1, axis2=2, dtype=np.float32)
+        self.assertEqualArray(result, mx.array(expected))
+
     def test_atleast_1d(self):
         def compare_nested_lists(x, y):
             if isinstance(x, list) and isinstance(y, list):
@@ -2010,6 +2415,270 @@ class TestOps(mlx_tests.MLXTestCase):
             self.assertEqual(mx_res.shape, np_res.shape)
             self.assertEqual(mx_res.ndim, np_res.ndim)
             self.assertTrue(mx.all(mx.equal(mx_res, atleast_arrays[i])))
+
+    def test_issubdtype(self):
+        self.assertTrue(mx.issubdtype(mx.bfloat16, mx.inexact))
+
+        cats = [
+            "complexfloating",
+            "floating",
+            "inexact",
+            "signedinteger",
+            "unsignedinteger",
+            "integer",
+            "number",
+            "generic",
+            "bool_",
+            "uint8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+            "float16",
+            "float32",
+            "complex64",
+        ]
+
+        for a in cats:
+            for b in cats:
+                self.assertEqual(
+                    mx.issubdtype(getattr(mx, a), getattr(mx, b)),
+                    np.issubdtype(getattr(np, a), getattr(np, b)),
+                    f"mx and np don't aggree on {a}, {b}",
+                )
+
+    def test_bitwise_ops(self):
+        types = [
+            mx.uint8,
+            mx.uint16,
+            mx.uint32,
+            mx.uint64,
+            mx.int8,
+            mx.int16,
+            mx.int32,
+            mx.int64,
+        ]
+        a = mx.random.randint(0, 4096, (1000,))
+        b = mx.random.randint(0, 4096, (1000,))
+        for op in ["bitwise_and", "bitwise_or", "bitwise_xor"]:
+            for t in types:
+                a_mlx = a.astype(t)
+                b_mlx = b.astype(t)
+                a_np = np.array(a_mlx)
+                b_np = np.array(b_mlx)
+                out_mlx = getattr(mx, op)(a_mlx, b_mlx)
+                out_np = getattr(np, op)(a_np, b_np)
+                self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+        for op in ["left_shift", "right_shift"]:
+            for t in types:
+                a_mlx = a.astype(t)
+                b_mlx = mx.random.randint(0, t.size, (1000,)).astype(t)
+                a_np = np.array(a_mlx)
+                b_np = np.array(b_mlx)
+                out_mlx = getattr(mx, op)(a_mlx, b_mlx)
+                out_np = getattr(np, op)(a_np, b_np)
+                self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+
+        # Check broadcasting
+        a = mx.ones((3, 1, 5), dtype=mx.bool_)
+        b = mx.zeros((1, 2, 5), dtype=mx.bool_)
+        c = a | b
+        self.assertEqual(c.shape, (3, 2, 5))
+        self.assertTrue(mx.array_equal(c, mx.ones((3, 2, 5), dtype=mx.bool_)))
+
+    def test_bitwise_grad(self):
+        a = np.random.randint(0, 10, size=(4, 3))
+        b = np.random.randint(0, 10, size=(4, 3))
+        cotangent = np.random.randint(0, 10, size=(4, 3))
+        a = mx.array(a)
+        b = mx.array(b)
+        cotangent = mx.array(cotangent)
+
+        def bitwise(a, b):
+            return a.astype(mx.int32) & b.astype(mx.int32)
+
+        _, vjps = mx.vjp(bitwise, [a, b], [cotangent])
+        for vjp in vjps:
+            self.assertFalse(np.any(np.array(vjp)))
+
+    def test_conjugate(self):
+        shape = (3, 5, 7)
+        a = np.random.normal(size=shape) + 1j * np.random.normal(size=shape)
+        a = a.astype(np.complex64)
+        ops = ["conjugate", "conj"]
+        for op in ops:
+            out_mlx = getattr(mx, op)(mx.array(a))
+            out_np = getattr(np, op)(a)
+            self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+        out_mlx = mx.array(a).conj()
+        out_np = a.conj()
+        self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+
+    def test_view(self):
+        a = mx.random.randint(shape=(4, 2, 4), low=-100, high=100)
+        a_np = np.array(a)
+
+        for t in ["bool_", "int16", "float32", "int64"]:
+            out = a.view(getattr(mx, t))
+            expected = a_np.view(getattr(np, t))
+            self.assertTrue(np.array_equal(out, expected, equal_nan=True))
+
+        # Irregular strides
+        a = mx.random.randint(shape=(2, 4), low=-100, high=100)
+        a = mx.broadcast_to(a, shape=(4, 2, 4))
+
+        for t in ["bool_", "int16", "float32", "int64"]:
+            out = a.view(getattr(mx, t))
+            a_out = out.view(mx.int32)
+            self.assertTrue(mx.array_equal(a_out, a, equal_nan=True))
+
+        a = mx.random.randint(shape=(4, 4), low=-100, high=100).T
+        for t in ["bool_", "int16", "float32", "int64"]:
+            out = a.view(getattr(mx, t))
+            a_out = out.view(mx.int32)
+            self.assertTrue(mx.array_equal(a_out, a, equal_nan=True))
+
+    def _hadamard(self, N):
+        # Matches scipy.linalg.hadamard
+        H = np.array([[1]], dtype=np.int64)
+        for i in range(0, np.log2(N).astype(np.int64)):
+            H = np.vstack((np.hstack((H, H)), np.hstack((H, -H))))
+        return H
+
+    def test_hadamard(self):
+        h28_str = """
+        +------++----++-+--+-+--++--
+        -+-----+++-----+-+--+-+--++-
+        --+-----+++---+-+-+----+--++
+        ---+-----+++---+-+-+-+--+--+
+        ----+-----+++---+-+-+++--+--
+        -----+-----++++--+-+--++--+-
+        ------++----++-+--+-+--++--+
+        --++++-+-------++--+++-+--+-
+        ---++++-+-----+-++--+-+-+--+
+        +---+++--+----++-++--+-+-+--
+        ++---++---+----++-++--+-+-+-
+        +++---+----+----++-++--+-+-+
+        ++++--------+-+--++-++--+-+-
+        -++++--------+++--++--+--+-+
+        -+-++-++--++--+--------++++-
+        +-+-++--+--++--+--------++++
+        -+-+-++--+--++--+----+---+++
+        +-+-+-++--+--+---+---++---++
+        ++-+-+-++--+------+--+++---+
+        -++-+-+-++--+------+-++++---
+        +-++-+---++--+------+-++++--
+        -++--++-+-++-+++----++------
+        +-++--++-+-++-+++-----+-----
+        ++-++---+-+-++-+++-----+----
+        -++-++-+-+-+-+--+++-----+---
+        --++-++++-+-+----+++-----+--
+        +--++-+-++-+-+----+++-----+-
+        ++--++-+-++-+-+----++------+
+        """
+
+        def parse_h_string(h_str):
+            return np.array(
+                [[1 if s == "+" else -1 for s in row] for row in h_str.split()]
+            )
+
+        h28 = parse_h_string(h28_str)
+
+        np.random.seed(7)
+        tests = product([np.float32, np.float16, np.int32], [1, 28], range(1, 15))
+        for dtype, m, k in tests:
+            # skip large m=28 cases because they're very slow in NumPy
+            if (m > 1 and k > 8) or (dtype != np.float16 and k == 14):
+                continue
+            with self.subTest(dtype=dtype, m=m, k=k):
+                n = m * 2**k
+                b = 4
+                scale = 0.34
+                x = np.random.normal(size=(b, n)).astype(dtype)
+                # contiguity check
+                x = mx.array(x)[::2]
+                y = mx.hadamard_transform(x, scale=scale)
+                mx.eval(y)
+                h = (
+                    self._hadamard(2**k)
+                    if m == 1
+                    else np.kron(h28, self._hadamard(2**k))
+                )
+                y_np = np.einsum("ij,bj->bi", h, x) * scale
+                atol = 2e-4 if dtype == np.float32 else 5e-2 * k
+                np.testing.assert_allclose(y, y_np, atol=atol)
+
+                # bfloat16 emulation on M1 means 2**14 doesn't fit in threadgroup memory
+                if dtype == np.float16 and k < 14:
+                    y_bf16 = mx.hadamard_transform(x.astype(mx.bfloat16), scale=scale)
+                    np.testing.assert_allclose(
+                        y_bf16.astype(mx.float16), y, atol=atol * 2
+                    )
+
+    def test_hadamard_grad_vmap(self):
+        np.random.seed(4)
+
+        for k in range(2, 8):
+            n = 2**k
+            x = np.random.normal(size=(n,))
+            h = self._hadamard(n)
+            c = np.random.normal(size=(n,))
+            x = mx.array(x).astype(mx.float32)
+            h = mx.array(h).astype(mx.float32)
+            c = mx.array(c).astype(mx.float32)
+
+            def hadamard_transform(x):
+                return h @ x / mx.sqrt(x.shape[-1])
+
+            out = mx.vjp(hadamard_transform, [x], [c])
+            out_t = mx.vjp(mx.hadamard_transform, [x], [c])
+            np.testing.assert_allclose(out, out_t, atol=1e-4)
+
+            for axis in (0, 1, 2):
+                vht = mx.vmap(mx.vmap(hadamard_transform, 0, 0), axis, axis)
+                vht_t = mx.vmap(mx.vmap(mx.hadamard_transform, 0, 0), axis, axis)
+
+                xb = mx.array(np.random.normal(size=(n, n, n)))
+                out = vht(xb)
+                out_t = vht_t(xb)
+                np.testing.assert_allclose(out, out_t, atol=1e-4)
+
+    def test_roll(self):
+        x = mx.arange(10).reshape(2, 5)
+
+        for s in [-2, -1, 0, 1, 2]:
+            y1 = np.roll(x, s)
+            y2 = mx.roll(x, s)
+            self.assertTrue(mx.array_equal(y1, y2).item())
+
+            y1 = np.roll(x, (s, s, s))
+            y2 = mx.roll(x, (s, s, s))
+            self.assertTrue(mx.array_equal(y1, y2).item())
+
+        shifts = [
+            1,
+            2,
+            -1,
+            -2,
+            (1, 1),
+            (-1, 2),
+            (33, 33),
+        ]
+        axes = [
+            0,
+            1,
+            (1, 0),
+            (0, 1),
+            (0, 0),
+            (1, 1),
+        ]
+        for s, a in product(shifts, axes):
+            y1 = np.roll(x, s, a)
+            y2 = mx.roll(x, s, a)
+            self.assertTrue(mx.array_equal(y1, y2).item())
 
 
 if __name__ == "__main__":

@@ -151,9 +151,9 @@ class TransformerEncoderLayer(Module):
         else:
             y = self.attention(x, x, x, mask)
             y = self.dropout1(y)
-            y = self.ln1(x + y)
+            x = self.ln1(x + y)
 
-            y = self.linear1(y)
+            y = self.linear1(x)
             y = self.activation(y)
             y = self.dropout2(y)
             y = self.linear2(y)
@@ -318,7 +318,7 @@ class Transformer(Module):
         norm_first (bool, optional): if ``True``, encoder and decoder layers
             will perform layer normalization before attention and MLP
             operations, otherwise after. Default: ``True``.
-        chekpoint (bool, optional): if ``True`` perform gradient checkpointing
+        checkpoint (bool, optional): if ``True`` perform gradient checkpointing
             to reduce the memory usage at the expense of more computation.
             Default: ``False``.
     """

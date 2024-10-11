@@ -1,9 +1,9 @@
-// Copyright © 2023-24 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
-#include <dlfcn.h>
 #include <cstdlib>
-#include <filesystem>
 #include <sstream>
+
+#include <sys/sysctl.h>
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -11,18 +11,28 @@
 
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/metal.h"
-#include "mlx/backend/metal/mps/gemm.h"
-
-namespace fs = std::filesystem;
+#include "mlx/backend/metal/metal_impl.h"
+#include "mlx/backend/metal/utils.h"
 
 namespace mlx::core::metal {
 
 namespace {
 
 // TODO nicer way to set this or possibly expose as an environment variable
-static constexpr int MAX_BUFFERS_PER_QUEUE = 12;
+constexpr int MAX_BUFFERS_PER_QUEUE = 12;
+constexpr int MAX_DISPATCHES_PER_ENCODER = 2;
 
-static constexpr const char* default_mtllib_path = METAL_PATH;
+constexpr const char* default_mtllib_path = METAL_PATH;
+
+constexpr auto get_metal_version() {
+#if (MLX_METAL_VERSION >= 320)
+  return MTL::LanguageVersion3_2;
+#elif (MLX_METAL_VERSION >= 310)
+  return MTL::LanguageVersion3_1;
+#else
+  return MTL::LanguageVersion3_0;
+#endif
+}
 
 auto load_device() {
   auto devices = MTL::CopyAllDevices();
@@ -33,7 +43,6 @@ auto load_device() {
   }
   return device;
 }
-
 std::pair<MTL::Library*, NS::Error*> load_library_from_path(
     MTL::Device* device,
     const char* path) {
@@ -112,6 +121,76 @@ MTL::Library* load_library(
 
 } // namespace
 
+CommandEncoder::CommandEncoder(MTL::CommandBuffer* cbuf) : cbuf(cbuf) {
+  enc = cbuf->computeCommandEncoder(MTL::DispatchTypeConcurrent);
+  enc->retain();
+}
+
+CommandEncoder::~CommandEncoder() {
+  enc->endEncoding();
+  enc->release();
+}
+
+void CommandEncoder::set_input_array(
+    const array& a,
+    int idx,
+    int64_t offset /* = 0 */) {
+  auto r_buf = static_cast<MTL::Resource*>(const_cast<void*>(a.buffer().ptr()));
+  if (auto it = outputs.find(r_buf); it != outputs.end()) {
+    // Insert a barrier
+    enc->memoryBarrier(&r_buf, 1);
+
+    // Remove the output
+    outputs.erase(it);
+  }
+  auto a_buf = static_cast<const MTL::Buffer*>(a.buffer().ptr());
+  auto base_offset = a.data<char>() -
+      static_cast<char*>(const_cast<MTL::Buffer*>(a_buf)->contents());
+  base_offset += offset;
+  enc->setBuffer(a_buf, base_offset, idx);
+}
+
+void CommandEncoder::set_output_array(
+    array& a,
+    int idx,
+    int64_t offset /* = 0 */) {
+  // Add barriers before adding the output to the output set
+  set_input_array(a, idx, offset);
+  auto buf = static_cast<MTL::Resource*>(a.buffer().ptr());
+  if (concurrent) {
+    concurrent_outputs.insert(buf);
+  } else {
+    outputs.insert(buf);
+  }
+}
+
+void CommandEncoder::dispatchThreadgroups(
+    MTL::Size grid_dims,
+    MTL::Size group_dims) {
+  num_dispatches++;
+  enc->dispatchThreadgroups(grid_dims, group_dims);
+  maybe_split();
+}
+
+void CommandEncoder::dispatchThreads(
+    MTL::Size grid_dims,
+    MTL::Size group_dims) {
+  num_dispatches++;
+  enc->dispatchThreads(grid_dims, group_dims);
+  maybe_split();
+}
+
+void CommandEncoder::maybe_split() {
+  if (num_dispatches > MAX_DISPATCHES_PER_ENCODER && !concurrent) {
+    enc->endEncoding();
+    enc->release();
+    num_dispatches = 0;
+    outputs.clear();
+    enc = cbuf->computeCommandEncoder(MTL::DispatchTypeConcurrent);
+    enc->retain();
+  }
+}
+
 Device::Device() {
   auto pool = new_scoped_memory_pool();
   device_ = load_device();
@@ -125,9 +204,6 @@ Device::~Device() {
   }
   for (auto& b : buffer_map_) {
     b.second.second->release();
-  }
-  for (auto& e : encoder_map_) {
-    e.second->release();
   }
   for (auto& k : kernel_map_) {
     k.second->release();
@@ -145,6 +221,7 @@ void Device::new_queue(int index) {
   // We lock this as a critical section for safety
   const std::lock_guard<std::mutex> lock(mtx_);
   auto q = device_->newCommandQueue(MAX_BUFFERS_PER_QUEUE);
+  debug_set_stream_queue_label(q, index);
   if (!q) {
     throw std::runtime_error(
         "[metal::Device] Failed to make new command queue.");
@@ -164,27 +241,26 @@ void Device::increment_command_buffer_ops(int index) {
 
 MTL::CommandBuffer* Device::get_command_buffer(int index) {
   auto bit = buffer_map_.find(index);
-  return (bit == buffer_map_.end()) ? nullptr : bit->second.second;
-}
+  if (bit == buffer_map_.end()) {
+    auto qit = queue_map_.find(index);
+    if (qit == queue_map_.end()) {
+      throw std::runtime_error(
+          "[metal::Device] Attempting to get command buffer for invalid queue.");
+    }
 
-MTL::CommandBuffer* Device::new_command_buffer(int index) {
-  auto qit = queue_map_.find(index);
-  if (qit == queue_map_.end()) {
-    throw std::runtime_error(
-        "[metal::Device] Attempting to get command buffer for invalid queue.");
+    auto cb = qit->second->commandBufferWithUnretainedReferences();
+
+    if (!cb) {
+      throw std::runtime_error(
+          "[metal::Device] Unable to create new command buffer");
+    }
+
+    // Increment ref count so the buffer is not garbage collected
+    cb->retain();
+
+    bit = buffer_map_.insert({index, {0, cb}}).first;
   }
-
-  auto cb = qit->second->commandBufferWithUnretainedReferences();
-
-  if (!cb) {
-    throw std::runtime_error(
-        "[metal::Device] Unable to create new command buffer");
-  }
-
-  // Increment ref count so the buffer is not garbage collected
-  cb->retain();
-
-  return buffer_map_.insert({index, {0, cb}}).first->second.second;
+  return bit->second.second;
 }
 
 void Device::commit_command_buffer(int index) {
@@ -195,24 +271,17 @@ void Device::commit_command_buffer(int index) {
 }
 
 void Device::end_encoding(int index) {
-  auto eit = encoder_map_.find(index);
-  if (eit != encoder_map_.end()) {
-    eit->second->endEncoding();
-    eit->second->release();
-    encoder_map_.erase(eit);
-  }
+  encoder_map_.erase(index);
 }
 
-MTL::ComputeCommandEncoder* Device::get_command_encoder(int index) {
+CommandEncoder& Device::get_command_encoder(int index) {
   auto eit = encoder_map_.find(index);
   if (eit == encoder_map_.end()) {
     auto cb = get_command_buffer(index);
-    auto compute_encoder = cb->computeCommandEncoder();
-    // Increment ref count so the buffer is not garbage collected
-    compute_encoder->retain();
-    eit = encoder_map_.insert({index, compute_encoder}).first;
+    eit =
+        encoder_map_.emplace(index, std::make_unique<CommandEncoder>(cb)).first;
   }
-  return eit->second;
+  return *(eit->second);
 }
 
 void Device::register_library(
@@ -224,23 +293,13 @@ void Device::register_library(
   }
 }
 
-void Device::register_library(
-    const std::string& lib_name,
-    const std::function<std::string(const std::string&)>& lib_path_func) {
-  if (auto it = library_map_.find(lib_name); it == library_map_.end()) {
-    std::string new_lib_path = lib_path_func(lib_name);
-    auto new_lib = load_library(device_, lib_name, new_lib_path.c_str());
-    library_map_.insert({lib_name, new_lib});
-  }
-}
-
 MTL::Library* Device::get_library_cache_(const std::string& lib_name) {
   // Search for cached metal lib
   MTL::Library* mtl_lib;
   if (auto it = library_map_.find(lib_name); it != library_map_.end()) {
     mtl_lib = it->second;
   } else { // Look for metallib alongside library
-    register_library(lib_name);
+    register_library(lib_name, get_colocated_mtllib_path(lib_name));
     mtl_lib = library_map_[lib_name];
   }
 
@@ -254,13 +313,16 @@ MTL::Library* Device::get_library_(const std::string& source_string) {
       NS::String::string(source_string.c_str(), NS::ASCIIStringEncoding);
 
   NS::Error* error = nullptr;
-  auto mtl_lib = device_->newLibrary(ns_code, nullptr, &error);
+  auto options = MTL::CompileOptions::alloc()->init();
+  options->setFastMathEnabled(false);
+  options->setLanguageVersion(get_metal_version());
+  auto mtl_lib = device_->newLibrary(ns_code, options, &error);
+  options->release();
 
   // Throw error if unable to compile library
   if (!mtl_lib) {
     std::ostringstream msg;
-    msg << "[metal::Device] Unable to load build metal library from source"
-        << "\n";
+    msg << "[metal::Device] Unable to build metal library from source" << "\n";
     if (error) {
       msg << error->localizedDescription()->utf8String() << "\n";
     }
@@ -279,8 +341,7 @@ MTL::Library* Device::get_library_(const MTL::StitchedLibraryDescriptor* desc) {
   // Throw error if unable to compile library
   if (!mtl_lib) {
     std::ostringstream msg;
-    msg << "[metal::Device] Unable to load build stitched metal library"
-        << "\n";
+    msg << "[metal::Device] Unable to build stitched metal library" << "\n";
     if (error) {
       msg << error->localizedDescription()->utf8String() << "\n";
     }
@@ -338,7 +399,6 @@ MTL::Function* Device::get_function_(
   }
 
   mtl_func_consts->release();
-  desc->release();
 
   return mtl_function;
 }
@@ -507,11 +567,13 @@ MTL::ComputePipelineState* Device::get_kernel(
   // Compile kernel to compute pipeline
   auto mtl_linked_funcs = get_linked_functions_(linked_functions);
   auto kernel = get_kernel_(kname, mtl_function, mtl_linked_funcs);
+
   mtl_function->release();
   mtl_linked_funcs->release();
 
   // Add kernel to cache
   kernel_map_.insert({kname, kernel});
+
   return kernel;
 }
 
@@ -538,17 +600,37 @@ Device& device(mlx::core::Device) {
   return metal_device;
 }
 
-std::shared_ptr<void> new_scoped_memory_pool() {
+std::unique_ptr<void, std::function<void(void*)>> new_scoped_memory_pool() {
   auto dtor = [](void* ptr) {
     static_cast<NS::AutoreleasePool*>(ptr)->release();
   };
-  return std::shared_ptr<void>(NS::AutoreleasePool::alloc()->init(), dtor);
+  return std::unique_ptr<void, std::function<void(void*)>>(
+      NS::AutoreleasePool::alloc()->init(), dtor);
 }
 
 void new_stream(Stream stream) {
   if (stream.device == mlx::core::Device::gpu) {
     device(stream.device).new_queue(stream.index);
   }
+}
+
+std::unordered_map<std::string, std::variant<std::string, size_t>>
+device_info() {
+  auto raw_device = device(default_device()).mtl_device();
+  auto arch = std::string(raw_device->architecture()->name()->utf8String());
+
+  int mib[] = {CTL_HW, HW_MEMSIZE};
+  size_t memsize = 0;
+  size_t length = sizeof(memsize);
+
+  sysctl(mib, 2, &memsize, &length, NULL, 0);
+
+  return {
+      {"architecture", arch},
+      {"max_buffer_length", raw_device->maxBufferLength()},
+      {"max_recommended_working_set_size",
+       raw_device->recommendedMaxWorkingSetSize()},
+      {"memory_size", memsize}};
 }
 
 } // namespace mlx::core::metal

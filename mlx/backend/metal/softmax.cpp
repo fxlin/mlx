@@ -1,18 +1,20 @@
-// Copyright © 2023 Apple Inc.
-
+// Copyright © 2023-2024 Apple Inc.
 #include <algorithm>
 
 #include "mlx/backend/metal/copy.h"
 #include "mlx/backend/metal/device.h"
+#include "mlx/backend/metal/kernels.h"
 #include "mlx/backend/metal/kernels/defines.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/primitives.h"
 
 namespace mlx::core {
 
+constexpr int SOFTMAX_LOOPED_LIMIT = 4096;
+
 void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
-  if (!is_floating_point(out.dtype())) {
+  if (!issubdtype(out.dtype(), floating)) {
     throw std::runtime_error(
         "[softmax] Does not support non-floating point types.");
   }
@@ -21,27 +23,30 @@ void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   // Make sure that the last dimension is contiguous
   std::vector<array> copies;
-  auto check_input = [&copies, &s](const array& x) {
-    bool no_copy = x.strides()[x.ndim() - 1] == 1;
-    if (x.ndim() > 1) {
+  auto check_input = [&copies, &s](const array& x) -> const array& {
+    bool no_copy = x.flags().contiguous && x.strides()[x.ndim() - 1] == 1;
+    if (no_copy && x.ndim() > 1) {
       auto s = x.strides()[x.ndim() - 2];
       no_copy &= (s == 0 || s == x.shape().back());
     }
     if (no_copy) {
       return x;
     } else {
-      array x_copy(x.shape(), x.dtype(), nullptr, {});
-      copy_gpu(x, x_copy, CopyType::General, s);
-      copies.push_back(x_copy);
-      return x_copy;
+      copies.push_back(array(x.shape(), x.dtype(), nullptr, {}));
+      copy_gpu(x, copies.back(), CopyType::General, s);
+      return copies.back();
     }
   };
   const array& in = check_input(inputs[0]);
-  out.set_data(
-      allocator::malloc_or_wait(in.data_size() * in.itemsize()),
-      in.data_size(),
-      in.strides(),
-      in.flags());
+  if (in.is_donatable()) {
+    out.move_shared_buffer(in);
+  } else {
+    out.set_data(
+        allocator::malloc_or_wait(in.data_size() * in.itemsize()),
+        in.data_size(),
+        in.strides(),
+        in.flags());
+  }
 
   int axis_size = in.shape().back();
   int n_rows = in.data_size() / axis_size;
@@ -49,15 +54,17 @@ void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
   const int simd_size = 32;
   const int n_reads = SOFTMAX_N_READS;
   const int looped_limit = SOFTMAX_LOOPED_LIMIT;
-  std::string op_name = "softmax_";
-  if (axis_size > looped_limit) {
-    op_name += "looped_";
-  }
-  op_name += type_to_name(out);
-  auto compute_encoder = d.get_command_encoder(s.index);
-  {
-    auto kernel = d.get_kernel(op_name);
 
+  std::string kernel_name = (axis_size > looped_limit) ? "looped_" : "block_";
+  kernel_name += "softmax_";
+  if (in.dtype() != float32 && precise_) {
+    kernel_name += "precise_";
+  }
+  kernel_name += type_to_name(out);
+
+  auto kernel = get_softmax_kernel(d, kernel_name, precise_, out);
+  auto& compute_encoder = d.get_command_encoder(s.index);
+  {
     MTL::Size grid_dims, group_dims;
     if (axis_size <= looped_limit) {
       size_t threadgroup_needed = (axis_size + n_reads - 1) / n_reads;
@@ -75,15 +82,18 @@ void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
     }
 
     compute_encoder->setComputePipelineState(kernel);
-    set_array_buffer(compute_encoder, in, 0);
-    set_array_buffer(compute_encoder, out, 1);
+    compute_encoder.set_input_array(
+        in.data_shared_ptr() == nullptr ? out : in, 0);
+    compute_encoder.set_output_array(out, 1);
     compute_encoder->setBytes(&axis_size, sizeof(int), 2);
-    compute_encoder->setThreadgroupMemoryLength(simd_size * in.itemsize(), 0);
-    compute_encoder->setThreadgroupMemoryLength(simd_size * in.itemsize(), 1);
-    compute_encoder->dispatchThreads(grid_dims, group_dims);
+    compute_encoder.dispatchThreads(grid_dims, group_dims);
   }
-  d.get_command_buffer(s.index)->addCompletedHandler(
-      [copies](MTL::CommandBuffer*) mutable { copies.clear(); });
+  if (!copies.empty()) {
+    d.get_command_buffer(s.index)->addCompletedHandler(
+        [copies = std::move(copies)](MTL::CommandBuffer*) mutable {
+          copies.clear();
+        });
+  }
 }
 
 } // namespace mlx::core

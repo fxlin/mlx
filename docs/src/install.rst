@@ -15,10 +15,10 @@ To install from PyPI you must meet the following requirements:
 
 - Using an M series chip (Apple silicon)
 - Using a native Python >= 3.8
-- macOS >= 13.3
+- macOS >= 13.5
 
 .. note::
-    MLX is only available on devices running macOS >= 13.3 
+    MLX is only available on devices running macOS >= 13.5
     It is highly recommended to use macOS 14 (Sonoma)
 
 
@@ -54,7 +54,7 @@ Build Requirements
 
 - A C++ compiler with C++17 support (e.g. Clang >= 5.0)
 - `cmake <https://cmake.org/>`_ -- version 3.24 or later, and ``make``
-- Xcode >= 14.3 (Xcode >= 15.0 for macOS 14 and above)
+- Xcode >= 15.0 and macOS SDK >= 14.0
 
 .. note::
    Ensure your shell environment is native ``arm``, not ``x86`` via Rosetta. If
@@ -70,39 +70,36 @@ To build and install the MLX python library from source, first, clone MLX from
 
    git clone git@github.com:ml-explore/mlx.git mlx && cd mlx
 
-Make sure that you have `pybind11 <https://pybind11.readthedocs.io/en/stable/index.html>`_
-installed. You can install ``pybind11`` with ``pip``, ``brew`` or ``conda`` as follows:
+Then simply build and install MLX using pip:
 
 .. code-block:: shell
 
-    pip install "pybind11[global]"
-    conda install pybind11
-    brew install pybind11
+  CMAKE_BUILD_PARALLEL_LEVEL=8 pip install .
 
-Then simply build and install it using pip:
-
-.. code-block:: shell
-
-   env CMAKE_BUILD_PARALLEL_LEVEL="" pip install .
-
-For developing use an editable install:
+For developing, install the package with development dependencies, and use an
+editable install:
 
 .. code-block:: shell
 
-  env CMAKE_BUILD_PARALLEL_LEVEL="" pip install -e .
+  CMAKE_BUILD_PARALLEL_LEVEL=8 pip install -e ".[dev]"
 
-To make sure the install is working run the tests with:
+Once the development dependencies are installed, you can build faster with:
 
 .. code-block:: shell
 
-  pip install ".[testing]"
+ CMAKE_BUILD_PARALLEL_LEVEL=8 python setup.py build_ext --inplace
+
+Run the tests with:
+
+.. code-block:: shell
+
   python -m unittest discover python/tests
 
-Optional: Install stubs to enable auto completions and type checking from your IDE:
+Optional: Install stubs to enable auto completions and type checking from your
+IDE:
 
 .. code-block:: shell
 
-  pip install ".[dev]"
   python setup.py generate_stubs
 
 C++ API
@@ -123,7 +120,7 @@ Create a build directory and run CMake and make:
 .. code-block:: shell
 
    mkdir -p build && cd build
-   cmake .. && make -j 
+   cmake .. && make -j
 
 Run tests with:
 
@@ -142,7 +139,7 @@ directory as the executable statically linked to ``libmlx.a`` or the
 preprocessor constant ``METAL_PATH`` should be defined at build time and it
 should point to the path to the built metal library.
 
-.. list-table:: Build Options 
+.. list-table:: Build Options
    :widths: 25 8
    :header-rows: 1
 
@@ -156,30 +153,66 @@ should point to the path to the built metal library.
      - OFF
    * - MLX_BUILD_METAL
      - ON
+   * - MLX_BUILD_CPU
+     - ON
    * - MLX_BUILD_PYTHON_BINDINGS
      - OFF
-
+   * - MLX_METAL_DEBUG
+     - OFF
+   * - MLX_BUILD_SAFETENSORS
+     - ON
+   * - MLX_BUILD_GGUF
+     - ON
+   * - MLX_METAL_JIT
+     - OFF
 
 .. note::
 
-    If you have multiple Xcode installations and wish to use 
-    a specific one while building, you can do so by adding the 
-    following environment variable before building 
+    If you have multiple Xcode installations and wish to use
+    a specific one while building, you can do so by adding the
+    following environment variable before building
 
     .. code-block:: shell
 
       export DEVELOPER_DIR="/path/to/Xcode.app/Contents/Developer/"
 
-    Further, you can use the following command to find out which 
+    Further, you can use the following command to find out which
     macOS SDK will be used
 
     .. code-block:: shell
 
       xcrun -sdk macosx --show-sdk-version
 
+Binary Size Minimization
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+To produce a smaller binary use the CMake flags ``CMAKE_BUILD_TYPE=MinSizeRel``
+and ``BUILD_SHARED_LIBS=ON``.
+
+The MLX CMake build has several additional options to make smaller binaries.
+For example, if you don't need the CPU backend or support for safetensors and
+GGUF, you can do:
+
+.. code-block:: shell
+
+  cmake .. \
+    -DCMAKE_BUILD_TYPE=MinSizeRel \
+    -DBUILD_SHARED_LIBS=ON \
+    -DMLX_BUILD_CPU=OFF \
+    -DMLX_BUILD_SAFETENSORS=OFF \
+    -DMLX_BUILD_GGUF=OFF \
+    -DMLX_METAL_JIT=ON
+
+THE ``MLX_METAL_JIT`` flag minimizes the size of the MLX Metal library which
+contains pre-built GPU kernels. This substantially reduces the size of the
+Metal library by run-time compiling kernels the first time they are used in MLX
+on a given machine. Note run-time compilation incurs a cold-start cost which can
+be anwywhere from a few hundred millisecond to a few seconds depending on the
+application. Once a kernel is compiled, it will be cached by the system. The
+Metal kernel cache persists accross reboots.
+
 Troubleshooting
 ^^^^^^^^^^^^^^^
-
 
 Metal not found
 ~~~~~~~~~~~~~~~
@@ -202,7 +235,7 @@ Then set the active developer directory:
 
   sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 
-x86 Shell 
+x86 Shell
 ~~~~~~~~~
 
 .. _build shell:

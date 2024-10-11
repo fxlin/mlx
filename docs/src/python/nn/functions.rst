@@ -13,10 +13,13 @@ simple functions.
    :template: nn-module-template.rst
 
    elu
+   celu
    gelu
    gelu_approx
    gelu_fast_approx
    glu
+   hard_shrink
+   hard_tanh
    hardswish
    leaky_relu
    log_sigmoid
@@ -29,6 +32,7 @@ simple functions.
    sigmoid
    silu
    softmax
+   softmin
    softplus
    softshrink
    step

@@ -43,6 +43,7 @@ are the CPU and GPU.
    usage/function_transforms
    usage/compile
    usage/numpy
+   usage/distributed
    usage/using_streams
 
 .. toctree::
@@ -58,14 +59,18 @@ are the CPU and GPU.
    :maxdepth: 1
 
    python/array
+   python/data_types
    python/devices_and_streams
    python/ops
    python/random
    python/transforms
+   python/fast
    python/fft
    python/linalg
+   python/metal
    python/nn
    python/optimizers
+   python/distributed
    python/tree_utils
 
 .. toctree::
@@ -79,3 +84,5 @@ are the CPU and GPU.
    :maxdepth: 1
 
    dev/extensions
+   dev/metal_debugger
+   dev/custom_metal_kernels

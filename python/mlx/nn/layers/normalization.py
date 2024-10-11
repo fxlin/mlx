@@ -85,13 +85,19 @@ class LayerNorm(Module):
         eps (float): A small additive constant for numerical stability
         affine (bool): If True learn an affine transform to apply after the
             normalization
+        bias (bool): If True include a translation to the affine
+            transformation. If set to False the transformation is not really affine
+            just scaling.
     """
 
-    def __init__(self, dims: int, eps: float = 1e-5, affine: bool = True):
+    def __init__(
+        self, dims: int, eps: float = 1e-5, affine: bool = True, bias: bool = True
+    ):
         super().__init__()
         if affine:
-            self.bias = mx.zeros((dims,))
             self.weight = mx.ones((dims,))
+            if bias:
+                self.bias = mx.zeros((dims,))
         self.eps = eps
         self.dims = dims
 
@@ -99,10 +105,9 @@ class LayerNorm(Module):
         return f"{self.dims}, eps={self.eps}, affine={'weight' in self}"
 
     def __call__(self, x):
-        means = mx.mean(x, axis=-1, keepdims=True)
-        var = mx.var(x, axis=-1, keepdims=True)
-        x = (x - means) * mx.rsqrt(var + self.eps)
-        return (self.weight * x + self.bias) if "weight" in self else x
+        weight = self.weight if "weight" in self else None
+        bias = self.bias if "bias" in self else None
+        return mx.fast.layer_norm(x, weight, bias, self.eps)
 
 
 class RMSNorm(Module):
@@ -116,6 +121,8 @@ class RMSNorm(Module):
 
     where :math:`\gamma` is a learned per feature dimension parameter initialized at
     1.
+
+    Note the accumulation for the mean is done in 32-bit precision.
 
     [1]: https://arxiv.org/abs/1910.07467
 
@@ -133,18 +140,7 @@ class RMSNorm(Module):
         return f"{self.weight.shape[0]}, eps={self.eps}"
 
     def __call__(self, x):
-        # S is 1/sqrt(N) where N is the size of the features of x and is used
-        # to compute a numerically more stable RMS of x by multiplying with S
-        # first and summing.
-        #
-        # This way we prefer underflow over overflow which is controlled with
-        # the parameter epsilon anyway.
-        S = 1 / x.shape[-1] ** 0.5
-
-        n = (x * S).square().sum(axis=-1, keepdims=True)
-        n = mx.rsqrt(n + self.eps)
-
-        return self.weight * x * n
+        return mx.fast.rms_norm(x, self["weight"], self.eps)
 
 
 class GroupNorm(Module):
@@ -203,18 +199,17 @@ class GroupNorm(Module):
     def _pytorch_compatible_group_norm(self, x):
         num_groups = self.num_groups
         batch, *rest, dims = x.shape
+        group_size = dims // num_groups
 
         # Split into groups
-        x = x.reshape(batch, -1, num_groups, dims // num_groups)
-        x = x.transpose(0, 1, 3, 2).reshape(batch, -1, num_groups)
+        x = x.reshape(batch, -1, num_groups, group_size)
+        x = x.transpose(0, 2, 1, 3).reshape(batch, num_groups, -1)
 
         # Normalize
-        means = mx.mean(x, axis=1, keepdims=True)
-        var = mx.var(x, axis=1, keepdims=True)
-        x = (x - means) * mx.rsqrt(var + self.eps)
-        x = x.reshape(batch, -1, dims // num_groups, num_groups)
-        x = x.transpose(0, 1, 3, 2).reshape(batch, *rest, dims)
+        x = mx.fast.layer_norm(x, eps=self.eps, weight=None, bias=None)
 
+        x = x.reshape(batch, num_groups, -1, group_size)
+        x = x.transpose(0, 2, 1, 3).reshape(batch, *rest, dims)
         return x
 
     def _group_norm(self, x):

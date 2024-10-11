@@ -5,6 +5,7 @@ from typing import Any
 
 import mlx.core as mx
 from mlx.nn.layers.base import Module
+from mlx.nn.layers.quantized import QuantizedLinear
 
 
 class Identity(Module):
@@ -64,10 +65,14 @@ class Linear(Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         if "bias" in self:
-            x = mx.addmm(self.bias, x, self.weight.T)
+            x = mx.addmm(self["bias"], x, self["weight"].T)
         else:
-            x = x @ self.weight.T
+            x = x @ self["weight"].T
         return x
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4):
+        """Return a :obj:`QuantizedLinear` layer that approximates this layer."""
+        return QuantizedLinear.from_linear(self, group_size, bits)
 
 
 class Bilinear(Module):

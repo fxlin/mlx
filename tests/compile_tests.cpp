@@ -214,9 +214,10 @@ TEST_CASE("test simplify multi output") {
   // is respected in simplification
   {
     auto e = compile(multi_three)({})[0];
+    CHECK_EQ(e.inputs().size(), 4);
+    CHECK_EQ(e.inputs().at(0).id(), e.inputs().at(2).id());
+    CHECK_EQ(e.inputs().at(1).id(), e.inputs().at(3).id());
     CHECK(array_equal(e, array({0.0f, 1.0f, 0.0f, 1.0f})).item<bool>());
-    CHECK_EQ(e.inputs()[0].id(), e.inputs()[2].id());
-    CHECK_EQ(e.inputs()[1].id(), e.inputs()[3].id());
   }
   set_compile_mode(CompileMode::enabled);
 }
@@ -701,5 +702,20 @@ TEST_CASE("test shapeless compile") {
     // Recompile since ndim changes
     out2 = cfun({array({1.0, 2.0}, {1, 2})})[0];
     CHECK_NE(out.inputs()[1].id(), out2.inputs()[1].id());
+  }
+}
+
+auto compile_broadcast_add(const std::vector<array>& inputs) {
+  auto b = zeros({8, 8});
+  return std::vector<array>{inputs[0] + b};
+}
+
+TEST_CASE("test compile strides") {
+  {
+    auto cfun = compile(compile_broadcast_add);
+    auto a = zeros({1, 8, 8});
+    auto out = cfun({a})[0];
+    eval(out);
+    CHECK_EQ(out.strides().size(), 3);
   }
 }

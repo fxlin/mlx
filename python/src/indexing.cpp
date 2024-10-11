@@ -1,25 +1,25 @@
-// Copyright © 2023 Apple Inc.
-
+// Copyright © 2023-2024 Apple Inc.
 #include <numeric>
 #include <sstream>
 
+#include "python/src/convert.h"
 #include "python/src/indexing.h"
 
 #include "mlx/ops.h"
 
-bool is_none_slice(const py::slice& in_slice) {
+bool is_none_slice(const nb::slice& in_slice) {
   return (
-      py::getattr(in_slice, "start").is_none() &&
-      py::getattr(in_slice, "stop").is_none() &&
-      py::getattr(in_slice, "step").is_none());
+      nb::getattr(in_slice, "start").is_none() &&
+      nb::getattr(in_slice, "stop").is_none() &&
+      nb::getattr(in_slice, "step").is_none());
 }
 
-int get_slice_int(py::object obj, int default_val) {
+int get_slice_int(nb::object obj, int default_val) {
   if (!obj.is_none()) {
-    if (!py::isinstance<py::int_>(obj)) {
+    if (!nb::isinstance<nb::int_>(obj)) {
       throw std::invalid_argument("Slice indices must be integers or None.");
     }
-    return py::cast<int>(py::cast<py::int_>(obj));
+    return nb::cast<int>(nb::cast<nb::int_>(obj));
   }
   return default_val;
 }
@@ -28,7 +28,7 @@ void get_slice_params(
     int& starts,
     int& ends,
     int& strides,
-    const py::slice& in_slice,
+    const nb::slice& in_slice,
     int axis_size) {
   // Following numpy's convention
   //    Assume n is the number of elements in the dimension being sliced.
@@ -36,26 +36,27 @@ void get_slice_params(
   //    k < 0 . If j is not given it defaults to n for k > 0 and -n-1 for
   //    k < 0 . If k is not given it defaults to 1
 
-  strides = get_slice_int(py::getattr(in_slice, "step"), 1);
+  strides = get_slice_int(nb::getattr(in_slice, "step"), 1);
   starts = get_slice_int(
-      py::getattr(in_slice, "start"), strides < 0 ? axis_size - 1 : 0);
+      nb::getattr(in_slice, "start"), strides < 0 ? axis_size - 1 : 0);
   ends = get_slice_int(
-      py::getattr(in_slice, "stop"), strides < 0 ? -axis_size - 1 : axis_size);
+      nb::getattr(in_slice, "stop"), strides < 0 ? -axis_size - 1 : axis_size);
 }
 
-array get_int_index(py::object idx, int axis_size) {
-  int idx_ = py::cast<int>(idx);
+array get_int_index(nb::object idx, int axis_size) {
+  int idx_ = nb::cast<int>(idx);
   idx_ = (idx_ < 0) ? idx_ + axis_size : idx_;
 
   return array(idx_, uint32);
 }
 
-bool is_valid_index_type(const py::object& obj) {
-  return py::isinstance<py::slice>(obj) || py::isinstance<py::int_>(obj) ||
-      py::isinstance<array>(obj) || obj.is_none() || py::ellipsis().is(obj);
+bool is_valid_index_type(const nb::object& obj) {
+  return nb::isinstance<nb::slice>(obj) || nb::isinstance<nb::int_>(obj) ||
+      nb::isinstance<array>(obj) || obj.is_none() || nb::ellipsis().is(obj) ||
+      nb::isinstance<nb::list>(obj);
 }
 
-array mlx_get_item_slice(const array& src, const py::slice& in_slice) {
+array mlx_get_item_slice(const array& src, const nb::slice& in_slice) {
   // Check input and raise error if 0 dim for parity with np
   if (src.ndim() == 0) {
     throw std::invalid_argument(
@@ -92,7 +93,7 @@ array mlx_get_item_array(const array& src, const array& indices) {
   return take(src, indices, 0);
 }
 
-array mlx_get_item_int(const array& src, const py::int_& idx) {
+array mlx_get_item_int(const array& src, const nb::int_& idx) {
   // Check input and raise error if 0 dim for parity with np
   if (src.ndim() == 0) {
     throw std::invalid_argument(
@@ -106,7 +107,7 @@ array mlx_get_item_int(const array& src, const py::int_& idx) {
 
 array mlx_gather_nd(
     array src,
-    const std::vector<py::object>& indices,
+    const std::vector<nb::object>& indices,
     bool gather_first,
     int& max_dims) {
   max_dims = 0;
@@ -117,9 +118,10 @@ array mlx_gather_nd(
   for (int i = 0; i < indices.size(); i++) {
     auto& idx = indices[i];
 
-    if (py::isinstance<py::slice>(idx)) {
+    if (nb::isinstance<nb::slice>(idx)) {
       int start, end, stride;
-      get_slice_params(start, end, stride, idx, src.shape(i));
+      get_slice_params(
+          start, end, stride, nb::cast<nb::slice>(idx), src.shape(i));
 
       // Handle negative indices
       start = (start < 0) ? start + src.shape(i) : start;
@@ -128,10 +130,10 @@ array mlx_gather_nd(
       gather_indices.push_back(arange(start, end, stride, uint32));
       num_slices++;
       is_slice[i] = true;
-    } else if (py::isinstance<py::int_>(idx)) {
+    } else if (nb::isinstance<nb::int_>(idx)) {
       gather_indices.push_back(get_int_index(idx, src.shape(i)));
-    } else if (py::isinstance<array>(idx)) {
-      auto arr = py::cast<array>(idx);
+    } else if (nb::isinstance<array>(idx)) {
+      auto arr = nb::cast<array>(idx);
       max_dims = std::max(static_cast<int>(arr.ndim()), max_dims);
       gather_indices.push_back(arr);
     }
@@ -185,7 +187,69 @@ array mlx_gather_nd(
   return src;
 }
 
-array mlx_get_item_nd(array src, const py::tuple& entries) {
+auto mlx_expand_ellipsis(
+    const std::vector<int>& shape,
+    const nb::tuple& entries) {
+  std::vector<nb::object> indices;
+
+  // Go over all entries and note the position of ellipsis
+  int non_none_indices_before = 0;
+  int non_none_indices_after = 0;
+  std::vector<nb::object> r_indices;
+  int i = 0;
+  bool has_ellipsis = false;
+
+  // Start from dimension 0 till we hit an ellipsis
+  for (; i < entries.size(); i++) {
+    auto idx = entries[i];
+    if (!is_valid_index_type(idx)) {
+      throw std::invalid_argument(
+          "Cannot index mlx array using the given type yet");
+    }
+    if (!nb::ellipsis().is(idx)) {
+      indices.push_back(idx);
+      non_none_indices_before += !idx.is_none();
+    } else {
+      has_ellipsis = true;
+      break;
+    }
+  }
+
+  // If we do hit an ellipsis, collect indices from the back
+  for (int j = entries.size() - 1; j > i; j--) {
+    auto idx = entries[j];
+    if (!is_valid_index_type(idx)) {
+      throw std::invalid_argument(
+          "Cannot index mlx array using the given type yet");
+    }
+    if (nb::ellipsis().is(idx)) {
+      throw std::invalid_argument(
+          "An index can only have a single ellipsis (...)");
+    }
+    r_indices.push_back(idx);
+    non_none_indices_after += !idx.is_none();
+  }
+
+  // Count up the number of non none indices
+  int non_none_indices = non_none_indices_before + non_none_indices_after;
+
+  // Expand ellipsis
+  if (has_ellipsis) {
+    for (int axis = non_none_indices_before;
+         axis < shape.size() - non_none_indices_after;
+         axis++) {
+      indices.push_back(nb::slice(0, shape[axis], 1));
+      non_none_indices++;
+    }
+  }
+
+  // Insert indices collected after the ellipsis
+  indices.insert(indices.end(), r_indices.rbegin(), r_indices.rend());
+
+  return std::make_pair(non_none_indices, indices);
+}
+
+array mlx_get_item_nd(array src, const nb::tuple& entries) {
   // No indices make this a noop
   if (entries.size() == 0) {
     return src;
@@ -193,70 +257,31 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
 
   // The plan is as follows:
   // 1. Replace the ellipsis with a series of slice(None)
-  // 2. Loop over the indices and calculate the gather indices
-  // 3. Calculate the remaining slices and reshapes
+  // 2. Convert list to array
+  // 3. Loop over the indices and calculate the gather indices
+  // 4. Calculate the remaining slices and reshapes
 
   // Ellipsis handling
-  std::vector<py::object> indices;
-  {
-    int non_none_indices_before = 0;
-    int non_none_indices_after = 0;
-    std::vector<py::object> r_indices;
-    int i = 0;
-    for (; i < entries.size(); i++) {
-      auto idx = entries[i];
-      if (!is_valid_index_type(idx)) {
-        throw std::invalid_argument(
-            "Cannot index mlx array using the given type yet");
-      }
-      if (!py::ellipsis().is(idx)) {
-        indices.push_back(idx);
-        non_none_indices_before += !idx.is_none();
-      } else {
-        break;
-      }
+  auto [non_none_indices, indices] = mlx_expand_ellipsis(src.shape(), entries);
+  // List handling
+  for (auto& idx : indices) {
+    if (nb::isinstance<nb::list>(idx)) {
+      idx = nb::cast(array_from_list(nb::cast<nb::list>(idx), {}));
     }
-    for (int j = entries.size() - 1; j > i; j--) {
-      auto idx = entries[j];
-      if (!is_valid_index_type(idx)) {
-        throw std::invalid_argument(
-            "Cannot index mlx array using the given type yet");
-      }
-      if (py::ellipsis().is(idx)) {
-        throw std::invalid_argument(
-            "An index can only have a single ellipsis (...)");
-      }
-      r_indices.push_back(idx);
-      non_none_indices_after += !idx.is_none();
-    }
-    for (int axis = non_none_indices_before;
-         axis < src.ndim() - non_none_indices_after;
-         axis++) {
-      indices.push_back(py::slice(0, src.shape(axis), 1));
-    }
-    indices.insert(indices.end(), r_indices.rbegin(), r_indices.rend());
   }
 
   // Check for the number of indices passed
-  {
-    int cnt = src.ndim();
-    for (auto& idx : indices) {
-      if (!idx.is_none()) {
-        cnt--;
-      }
-    }
-    if (cnt < 0) {
-      std::ostringstream msg;
-      msg << "Too many indices for array with " << src.ndim() << "dimensions.";
-      throw std::invalid_argument(msg.str());
-    }
+  if (non_none_indices > src.ndim()) {
+    std::ostringstream msg;
+    msg << "Too many indices for array with " << src.ndim() << " dimensions.";
+    throw std::invalid_argument(msg.str());
   }
 
   // Gather handling
   //
   // Check whether we have arrays or integer indices and delegate to gather_nd
   // after removing the slices at the end and all Nones.
-  std::vector<py::object> remaining_indices;
+  std::vector<nb::object> remaining_indices;
   bool have_array = false;
   {
     // First check whether the results of gather are going to be 1st or
@@ -264,7 +289,7 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
     bool have_non_array = false;
     bool gather_first = false;
     for (auto& idx : indices) {
-      if (py::isinstance<array>(idx) || py::isinstance<py::int_>(idx)) {
+      if (nb::isinstance<array>(idx) || (nb::isinstance<nb::int_>(idx))) {
         if (have_array && have_non_array) {
           gather_first = true;
           break;
@@ -275,17 +300,24 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
       }
     }
 
+    int n_arr = 0;
+    for (auto& idx : indices) {
+      n_arr += nb::isinstance<array>(idx);
+    }
+
+    have_array &= n_arr > 0;
+
     if (have_array) {
       int last_array;
       // Then find the last array
       for (last_array = indices.size() - 1; last_array >= 0; last_array--) {
         auto& idx = indices[last_array];
-        if (py::isinstance<array>(idx) || py::isinstance<py::int_>(idx)) {
+        if (nb::isinstance<array>(idx) || nb::isinstance<nb::int_>(idx)) {
           break;
         }
       }
 
-      std::vector<py::object> gather_indices;
+      std::vector<nb::object> gather_indices;
       for (int i = 0; i <= last_array; i++) {
         auto& idx = indices[i];
         if (!idx.is_none()) {
@@ -299,15 +331,15 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
       if (gather_first) {
         for (int i = 0; i < max_dims; i++) {
           remaining_indices.push_back(
-              py::slice(py::none(), py::none(), py::none()));
+              nb::slice(nb::none(), nb::none(), nb::none()));
         }
         for (int i = 0; i < last_array; i++) {
           auto& idx = indices[i];
           if (idx.is_none()) {
             remaining_indices.push_back(indices[i]);
-          } else if (py::isinstance<py::slice>(idx)) {
+          } else if (nb::isinstance<nb::slice>(idx)) {
             remaining_indices.push_back(
-                py::slice(py::none(), py::none(), py::none()));
+                nb::slice(nb::none(), nb::none(), nb::none()));
           }
         }
         for (int i = last_array + 1; i < indices.size(); i++) {
@@ -316,18 +348,18 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
       } else {
         for (int i = 0; i < indices.size(); i++) {
           auto& idx = indices[i];
-          if (py::isinstance<array>(idx) || py::isinstance<py::int_>(idx)) {
+          if (nb::isinstance<array>(idx) || nb::isinstance<nb::int_>(idx)) {
             break;
           } else if (idx.is_none()) {
             remaining_indices.push_back(idx);
           } else {
             remaining_indices.push_back(
-                py::slice(py::none(), py::none(), py::none()));
+                nb::slice(nb::none(), nb::none(), nb::none()));
           }
         }
         for (int i = 0; i < max_dims; i++) {
           remaining_indices.push_back(
-              py::slice(py::none(), py::none(), py::none()));
+              nb::slice(nb::none(), nb::none(), nb::none()));
         }
         for (int i = last_array + 1; i < indices.size(); i++) {
           remaining_indices.push_back(indices[i]);
@@ -342,6 +374,9 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
     remaining_indices = indices;
   }
 
+  bool squeeze_needed = false;
+  bool unsqueeze_needed = false;
+
   // Slice handling
   {
     std::vector<int> starts(src.ndim(), 0);
@@ -350,51 +385,80 @@ array mlx_get_item_nd(array src, const py::tuple& entries) {
     int axis = 0;
     for (auto& idx : remaining_indices) {
       if (!idx.is_none()) {
-        get_slice_params(
-            starts[axis], ends[axis], strides[axis], idx, ends[axis]);
+        if (!have_array && nb::isinstance<nb::int_>(idx)) {
+          int st = nb::cast<int>(idx);
+          st = (st < 0) ? st + src.shape(axis) : st;
+
+          starts[axis] = st;
+          ends[axis] = st + 1;
+
+          squeeze_needed = true;
+
+        } else {
+          get_slice_params(
+              starts[axis],
+              ends[axis],
+              strides[axis],
+              nb::cast<nb::slice>(idx),
+              ends[axis]);
+        }
+
         axis++;
+      } else {
+        unsqueeze_needed = true;
       }
     }
     src = slice(src, starts, ends, strides);
   }
 
   // Unsqueeze handling
-  if (remaining_indices.size() > src.ndim()) {
+  if (unsqueeze_needed || squeeze_needed) {
     std::vector<int> out_shape;
     int axis = 0;
     for (auto& idx : remaining_indices) {
-      if (idx.is_none()) {
+      if (unsqueeze_needed && idx.is_none()) {
         out_shape.push_back(1);
+      } else if (squeeze_needed && nb::isinstance<nb::int_>(idx)) {
+        axis++;
       } else {
         out_shape.push_back(src.shape(axis++));
       }
     }
+
+    out_shape.insert(
+        out_shape.end(), src.shape().begin() + axis, src.shape().end());
+
     src = reshape(src, out_shape);
   }
 
   return src;
 }
 
-array mlx_get_item(const array& src, const py::object& obj) {
-  if (py::isinstance<py::slice>(obj)) {
-    return mlx_get_item_slice(src, obj);
-  } else if (py::isinstance<array>(obj)) {
-    return mlx_get_item_array(src, py::cast<array>(obj));
-  } else if (py::isinstance<py::int_>(obj)) {
-    return mlx_get_item_int(src, obj);
-  } else if (py::isinstance<py::tuple>(obj)) {
-    return mlx_get_item_nd(src, obj);
+array mlx_get_item(const array& src, const nb::object& obj) {
+  if (nb::isinstance<nb::slice>(obj)) {
+    return mlx_get_item_slice(src, nb::cast<nb::slice>(obj));
+  } else if (nb::isinstance<array>(obj)) {
+    return mlx_get_item_array(src, nb::cast<array>(obj));
+  } else if (nb::isinstance<nb::int_>(obj)) {
+    return mlx_get_item_int(src, nb::cast<nb::int_>(obj));
+  } else if (nb::isinstance<nb::tuple>(obj)) {
+    return mlx_get_item_nd(src, nb::cast<nb::tuple>(obj));
+  } else if (nb::isinstance<nb::ellipsis>(obj)) {
+    return src;
   } else if (obj.is_none()) {
     std::vector<int> s(1, 1);
     s.insert(s.end(), src.shape().begin(), src.shape().end());
     return reshape(src, s);
+  } else if (nb::isinstance<nb::list>(obj)) {
+    return mlx_get_item_array(
+        src, array_from_list(nb::cast<nb::list>(obj), {}));
   }
   throw std::invalid_argument("Cannot index mlx array using the given type.");
 }
 
 std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_int(
     const array& src,
-    const py::int_& idx,
+    const nb::int_& idx,
     const array& update) {
   if (src.ndim() == 0) {
     throw std::invalid_argument(
@@ -446,7 +510,7 @@ std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_array(
 
 std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_slice(
     const array& src,
-    const py::slice& in_slice,
+    const nb::slice& in_slice,
     const array& update) {
   // Check input and raise error if 0 dim for parity with np
   if (src.ndim() == 0) {
@@ -472,59 +536,56 @@ std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_slice(
   // Check and update slice params
   get_slice_params(start, end, stride, in_slice, end);
 
+  // If simple stride
+  if (stride == 1) {
+    // Squeeze out singleton dims from the start of update
+    int s = 0;
+    for (; s < update.ndim() && update.shape(s) == 1; s++)
+      ;
+    auto up_shape =
+        std::vector<int>(update.shape().begin() + s, update.shape().end());
+    auto up = reshape(update, up_shape);
+
+    // Build array to mark start of slice
+    auto idx = array({start}, {1}, uint32);
+
+    // Get slice size
+    int slice_size = (end - start);
+
+    // Broadcast update to slice size
+    std::vector<int> up_shape_broadcast = {1, slice_size};
+    up_shape_broadcast.insert(
+        up_shape_broadcast.end(), src.shape().begin() + 1, src.shape().end());
+
+    up = broadcast_to(up, up_shape_broadcast);
+
+    auto indices = std::vector<array>{idx};
+    auto axes = std::vector<int>{0};
+
+    return {indices, up, axes};
+  }
+
   return mlx_scatter_args_array(
       src, arange(start, end, stride, uint32), update);
 }
 
 std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_nd(
     const array& src,
-    const py::tuple& entries,
+    const nb::tuple& entries,
     const array& update) {
-  std::vector<py::object> indices;
-  int non_none_indices = 0;
-
   // Expand ellipses into a series of ':' slices
-  {
-    int non_none_indices_before = 0;
-    int non_none_indices_after = 0;
-    bool has_ellipsis = false;
-    int indices_before = 0;
-    for (int i = 0; i < entries.size(); ++i) {
-      auto idx = entries[i];
-      if (!is_valid_index_type(idx)) {
-        throw std::invalid_argument(
-            "Cannot index mlx array using the given type yet");
-      } else if (!py::ellipsis().is(idx)) {
-        if (!has_ellipsis) {
-          indices_before++;
-          non_none_indices_before += !idx.is_none();
-        } else {
-          non_none_indices_after += !idx.is_none();
-        }
-        indices.push_back(idx);
-      } else if (has_ellipsis) {
-        throw std::invalid_argument(
-            "An index can only have a single ellipsis (...)");
-      } else {
-        has_ellipsis = true;
-      }
-    }
-    if (has_ellipsis) {
-      for (int axis = non_none_indices_before;
-           axis < src.ndim() - non_none_indices_after;
-           axis++) {
-        indices.insert(
-            indices.begin() + indices_before, py::slice(0, src.shape(axis), 1));
-      }
-      non_none_indices = src.ndim();
-    } else {
-      non_none_indices = non_none_indices_before + non_none_indices_after;
+  auto [non_none_indices, indices] = mlx_expand_ellipsis(src.shape(), entries);
+
+  // Convert List to array
+  for (auto& idx : indices) {
+    if (nb::isinstance<nb::list>(idx)) {
+      idx = nb::cast(array_from_list(nb::cast<nb::list>(idx), {}));
     }
   }
 
   if (non_none_indices > src.ndim()) {
     std::ostringstream msg;
-    msg << "Too many indices for array with " << src.ndim() << "dimensions.";
+    msg << "Too many indices for array with " << src.ndim() << " dimensions.";
     throw std::invalid_argument(msg.str());
   }
 
@@ -541,85 +602,154 @@ std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_nd(
     return {{}, broadcast_to(up, src.shape()), {}};
   }
 
+  // Analyse the types of the indices
   unsigned long max_dim = 0;
   bool arrays_first = false;
+  int num_none = 0;
   int num_slices = 0;
   int num_arrays = 0;
+  int num_strided_slices = 0;
+  int num_simple_slices_post = 0;
   {
     bool have_array = false;
     bool have_non_array = false;
     for (auto& idx : indices) {
-      if (py::isinstance<py::slice>(idx) || idx.is_none()) {
+      if (idx.is_none()) {
+        have_non_array = have_array;
+        num_none++;
+
+      } else if (nb::isinstance<nb::slice>(idx)) {
         have_non_array = have_array;
         num_slices++;
-      } else if (py::isinstance<array>(idx)) {
+
+        auto slice = nb::cast<nb::slice>(idx);
+        int stride = get_slice_int(nb::getattr(slice, "step"), 1);
+        if (stride != 1) {
+          num_strided_slices++;
+          num_simple_slices_post = 0;
+        } else {
+          num_simple_slices_post++;
+        }
+
+      } else if (nb::isinstance<array>(idx)) {
         have_array = true;
         if (have_array && have_non_array) {
           arrays_first = true;
         }
-        max_dim = std::max(py::cast<array>(idx).ndim(), max_dim);
+        max_dim = std::max(nb::cast<array>(idx).ndim(), max_dim);
         num_arrays++;
+        num_simple_slices_post = 0;
       }
     }
   }
 
+  // We have index dims for the arrays, strided slices (implemented as arrays),
+  // none
+  int idx_ndim = max_dim + num_none + num_slices - num_simple_slices_post;
+
+  // If we have simple non-strided slices, we also attach an index for that
+  idx_ndim = idx_ndim == 0 ? 1 : idx_ndim;
+
+  // Go over each index type and translate to the needed scatter args
   std::vector<array> arr_indices;
   int slice_num = 0;
   int array_num = 0;
   int ax = 0;
+
+  // We collect the shapes of the slices and updates during this process
+  std::vector<int> update_shape(non_none_indices, 1);
+  std::vector<int> slice_shapes;
+
   for (int i = 0; i < indices.size(); ++i) {
     auto& pyidx = indices[i];
-    if (py::isinstance<py::slice>(pyidx)) {
+    if (nb::isinstance<nb::slice>(pyidx)) {
       int start, end, stride;
       auto axis_size = src.shape(ax++);
-      get_slice_params(start, end, stride, pyidx, axis_size);
+      get_slice_params(
+          start, end, stride, nb::cast<nb::slice>(pyidx), axis_size);
 
       // Handle negative indices
       start = (start < 0) ? start + axis_size : start;
       end = (end < 0) ? end + axis_size : end;
 
-      auto idx = arange(start, end, stride, uint32);
-      std::vector<int> idx_shape(max_dim + num_slices, 1);
-      auto loc = slice_num + (arrays_first ? max_dim : 0);
-      slice_num++;
-      idx_shape[loc] = idx.size();
-      arr_indices.push_back(reshape(idx, idx_shape));
-    } else if (py::isinstance<py::int_>(pyidx)) {
-      arr_indices.push_back(get_int_index(pyidx, src.shape(ax++)));
-    } else if (pyidx.is_none()) {
-      slice_num++;
-    } else if (py::isinstance<array>(pyidx)) {
-      ax++;
-      auto idx = py::cast<array>(pyidx);
-      std::vector<int> idx_shape;
-      if (!arrays_first) {
-        idx_shape.insert(idx_shape.end(), slice_num, 1);
+      std::vector<int> idx_shape(idx_ndim, 1);
+
+      // If it's a simple slice, we only need to add the start index
+      if (array_num >= num_arrays && num_strided_slices <= 0 && stride == 1) {
+        auto idx = array({start}, idx_shape, uint32);
+        slice_shapes.push_back(end - start);
+        arr_indices.push_back(idx);
+
+        // Add the shape to the update
+        update_shape[ax - 1] = slice_shapes.back();
       }
-      idx_shape.insert(idx_shape.end(), max_dim - idx.ndim(), 1);
-      idx_shape.insert(idx_shape.end(), idx.shape().begin(), idx.shape().end());
-      idx_shape.insert(
-          idx_shape.end(), num_slices - (arrays_first ? 0 : slice_num), 1);
+      // Otherwise we expand the slice into indices using arange
+      else {
+        auto idx = arange(start, end, stride, uint32);
+        auto loc = slice_num + (arrays_first ? max_dim : 0);
+        idx_shape[loc] = idx.size();
+        arr_indices.push_back(reshape(idx, idx_shape));
+
+        slice_num++;
+        num_strided_slices--;
+
+        // Add the shape to the update
+        update_shape[ax - 1] = 1;
+      }
+    } else if (nb::isinstance<nb::int_>(pyidx)) {
+      // Add index to arrays
+      arr_indices.push_back(get_int_index(pyidx, src.shape(ax++)));
+      // Add the shape to the update
+      update_shape[ax - 1] = 1;
+    } else if (pyidx.is_none()) {
+      // We only use the None's for bookeeping dimensions
+      slice_num++;
+    } else if (nb::isinstance<array>(pyidx)) {
+      ax++;
+      auto idx = nb::cast<array>(pyidx);
+      std::vector<int> idx_shape(idx_ndim, 1);
+
+      // Place the arrays in the correct dimension
+      int st = (!arrays_first) * slice_num + max_dim - idx.ndim();
+      for (int j = 0; j < idx.ndim(); j++) {
+        idx_shape[st + j] = idx.shape()[j];
+      }
       arr_indices.push_back(reshape(idx, idx_shape));
       if (!arrays_first && ++array_num == num_arrays) {
         slice_num += max_dim;
       }
+
+      // Add the shape to the update
+      update_shape[ax - 1] = 1;
     } else {
       throw std::invalid_argument(
           "Cannot index mlx array using the given type yet");
     }
   }
 
+  // Broadcast the update to the indices and slices
   arr_indices = broadcast_arrays(arr_indices);
-  up_shape = arr_indices[0].shape();
-  up_shape.insert(
-      up_shape.end(),
+  auto up_shape_broadcast = arr_indices[0].shape();
+
+  up_shape_broadcast.insert(
+      up_shape_broadcast.end(), slice_shapes.begin(), slice_shapes.end());
+  up_shape_broadcast.insert(
+      up_shape_broadcast.end(),
       src.shape().begin() + non_none_indices,
       src.shape().end());
-  up = broadcast_to(up, up_shape);
-  up_shape.insert(
-      up_shape.begin() + arr_indices[0].ndim(), non_none_indices, 1);
-  up = reshape(up, up_shape);
+  up = broadcast_to(up, up_shape_broadcast);
 
+  // Reshape the update with the size-1 dims for the int and array indices
+  auto up_reshape = arr_indices[0].shape();
+  up_reshape.insert(up_reshape.end(), update_shape.begin(), update_shape.end());
+  up_reshape.insert(
+      up_reshape.end(),
+      src.shape().begin() + non_none_indices,
+      src.shape().end());
+
+  up = reshape(up, up_reshape);
+
+  // Collect axes
   std::vector<int> axes(arr_indices.size(), 0);
   std::iota(axes.begin(), axes.end(), 0);
 
@@ -629,24 +759,142 @@ std::tuple<std::vector<array>, array, std::vector<int>> mlx_scatter_args_nd(
 std::tuple<std::vector<array>, array, std::vector<int>>
 mlx_compute_scatter_args(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto vals = to_array(v, src.dtype());
-  if (py::isinstance<py::slice>(obj)) {
-    return mlx_scatter_args_slice(src, obj, vals);
-  } else if (py::isinstance<array>(obj)) {
-    return mlx_scatter_args_array(src, py::cast<array>(obj), vals);
-  } else if (py::isinstance<py::int_>(obj)) {
-    return mlx_scatter_args_int(src, obj, vals);
-  } else if (py::isinstance<py::tuple>(obj)) {
-    return mlx_scatter_args_nd(src, obj, vals);
+  if (nb::isinstance<nb::slice>(obj)) {
+    return mlx_scatter_args_slice(src, nb::cast<nb::slice>(obj), vals);
+  } else if (nb::isinstance<array>(obj)) {
+    return mlx_scatter_args_array(src, nb::cast<array>(obj), vals);
+  } else if (nb::isinstance<nb::int_>(obj)) {
+    return mlx_scatter_args_int(src, nb::cast<nb::int_>(obj), vals);
+  } else if (nb::isinstance<nb::tuple>(obj)) {
+    return mlx_scatter_args_nd(src, nb::cast<nb::tuple>(obj), vals);
   } else if (obj.is_none()) {
     return {{}, broadcast_to(vals, src.shape()), {}};
+  } else if (nb::isinstance<nb::list>(obj)) {
+    return mlx_scatter_args_array(
+        src, array_from_list(nb::cast<nb::list>(obj), {}), vals);
   }
+
   throw std::invalid_argument("Cannot index mlx array using the given type.");
 }
 
-void mlx_set_item(array& src, const py::object& obj, const ScalarOrArray& v) {
+auto mlx_slice_update(
+    const array& src,
+    const nb::object& obj,
+    const ScalarOrArray& v) {
+  // Can't route to slice update if not slice or tuple
+  if (src.ndim() == 0 ||
+      (!nb::isinstance<nb::slice>(obj) && !nb::isinstance<nb::tuple>(obj))) {
+    return std::make_pair(false, src);
+  }
+  if (nb::isinstance<nb::tuple>(obj)) {
+    // Can't route to slice update if any arrays are present
+    for (auto idx : nb::cast<nb::tuple>(obj)) {
+      if (nb::isinstance<array>(idx) || nb::isinstance<nb::list>(idx)) {
+        return std::make_pair(false, src);
+      }
+    }
+  }
+
+  // Should be able to route to slice update
+
+  // Pre process tuple
+  auto upd = to_array(v, src.dtype());
+
+  // Remove leading singletons dimensions from the update
+  int s = 0;
+  for (; s < upd.ndim() && upd.shape(s) == 1; s++) {
+  };
+  auto up_shape = std::vector<int>(upd.shape().begin() + s, upd.shape().end());
+  up_shape = up_shape.empty() ? std::vector{1} : up_shape;
+  auto up = reshape(upd, up_shape);
+
+  // Build slice update params
+  std::vector<int> starts(src.ndim(), 0);
+  std::vector<int> stops = src.shape();
+  std::vector<int> strides(src.ndim(), 1);
+
+  // If it's just a simple slice, just do a slice update and return
+  if (nb::isinstance<nb::slice>(obj)) {
+    // Read slice arguments
+    get_slice_params(
+        starts[0],
+        stops[0],
+        strides[0],
+        nb::cast<nb::slice>(obj),
+        src.shape(0));
+
+    // Do slice update
+    auto out = slice_update(src, up, starts, stops, strides);
+    return std::make_pair(true, out);
+  }
+
+  // It must be a tuple
+  auto entries = nb::cast<nb::tuple>(obj);
+
+  // Expand ellipses into a series of ':' slices
+  auto [non_none_indices, indices] = mlx_expand_ellipsis(src.shape(), entries);
+
+  // Dimension check
+  if (non_none_indices > src.ndim()) {
+    std::ostringstream msg;
+    msg << "Too many indices for array with " << src.ndim() << " dimensions.";
+    throw std::invalid_argument(msg.str());
+  }
+
+  // If no non-None indices return the broadcasted update
+  if (non_none_indices == 0) {
+    return std::make_pair(true, broadcast_to(up, src.shape()));
+  }
+
+  // Process entries
+  std::vector<int> up_reshape(src.ndim());
+  int ax = src.ndim() - 1;
+  int up_ax = up.ndim() - 1;
+  for (; ax >= non_none_indices; ax--) {
+    if (up_ax >= 0) {
+      up_reshape[ax] = up.shape(up_ax);
+      up_ax--;
+    } else {
+      up_reshape[ax] = 1;
+    }
+  }
+
+  for (int i = indices.size() - 1; i >= 0; --i) {
+    auto& pyidx = indices[i];
+    if (nb::isinstance<nb::slice>(pyidx)) {
+      get_slice_params(
+          starts[ax],
+          stops[ax],
+          strides[ax],
+          nb::cast<nb::slice>(pyidx),
+          src.shape(ax));
+      up_reshape[ax] = (up_ax >= 0) ? up.shape(up_ax--) : 1;
+      ax--;
+    } else if (nb::isinstance<nb::int_>(pyidx)) {
+      int st = nb::cast<int>(pyidx);
+      st = (st < 0) ? st + src.shape(ax) : st;
+      starts[ax] = st;
+      stops[ax] = st + 1;
+      up_reshape[ax] = 1;
+      ax--;
+    }
+  }
+
+  up = reshape(up, std::move(up_reshape));
+  auto out = slice_update(src, up, starts, stops, strides);
+  return std::make_pair(true, out);
+}
+
+void mlx_set_item(array& src, const nb::object& obj, const ScalarOrArray& v) {
+  auto [success, out] = mlx_slice_update(src, obj, v);
+  if (success) {
+    src.overwrite_descriptor(out);
+    return;
+  }
+
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
     auto out = scatter(src, indices, updates, axes);
@@ -658,7 +906,7 @@ void mlx_set_item(array& src, const py::object& obj, const ScalarOrArray& v) {
 
 array mlx_add_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
@@ -670,7 +918,7 @@ array mlx_add_item(
 
 array mlx_subtract_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
@@ -682,7 +930,7 @@ array mlx_subtract_item(
 
 array mlx_multiply_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
@@ -694,7 +942,7 @@ array mlx_multiply_item(
 
 array mlx_divide_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
@@ -706,7 +954,7 @@ array mlx_divide_item(
 
 array mlx_maximum_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {
@@ -718,7 +966,7 @@ array mlx_maximum_item(
 
 array mlx_minimum_item(
     const array& src,
-    const py::object& obj,
+    const nb::object& obj,
     const ScalarOrArray& v) {
   auto [indices, updates, axes] = mlx_compute_scatter_args(src, obj, v);
   if (indices.size() > 0) {

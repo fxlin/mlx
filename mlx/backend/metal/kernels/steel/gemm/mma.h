@@ -6,8 +6,8 @@
 #include <metal_simdgroup_matrix>
 #include <metal_stdlib>
 
+#include "mlx/backend/metal/kernels/steel/defines.h"
 #include "mlx/backend/metal/kernels/steel/gemm/transforms.h"
-#include "mlx/backend/metal/kernels/steel/utils.h"
 
 using namespace metal;
 
@@ -144,9 +144,9 @@ struct BlockMMA {
   }
 
   /* Store results from simdgroup_matrix results into device memory */
-  METAL_FUNC void store_result(device U* C, const int ldc) const {
+  METAL_FUNC void store_result(device U* D, const int ldd) const {
     // Adjust for simdgroup and thread location
-    C += (sm + tm) * ldc + tn + sn;
+    D += (sm + tm) * ldd + tn + sn;
 
     // Loop over all simdgroup tiles
     STEEL_PRAGMA_UNROLL
@@ -155,22 +155,22 @@ struct BlockMMA {
       for (short j = 0; j < TN; j++) {
         // Get accumulated result and associated offset in C
         thread const auto& accum = results[i * TN + j].thread_elements();
-        int offset = (i * TM_stride) * ldc + (j * TN_stride);
+        int offset = (i * TM_stride) * ldd + (j * TN_stride);
 
         // Apply epilogue
         U outs[2] = {Epilogue::apply(accum[0]), Epilogue::apply(accum[1])};
 
-        // Write out C
-        C[offset] = outs[0];
-        C[offset + 1] = outs[1];
+        // Write out D
+        D[offset] = outs[0];
+        D[offset + 1] = outs[1];
       }
     }
   }
 
   METAL_FUNC void
-  store_result_safe(device U* C, const int ldc, short2 dst_tile_dims) const {
+  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) const {
     // Adjust for simdgroup and thread location
-    C += (sm + tm) * ldc + (tn + sn);
+    D += (sm + tm) * ldd + (tn + sn);
     dst_tile_dims -= short2(tn + sn, sm + tm);
 
     if (dst_tile_dims.x <= 0 || dst_tile_dims.y <= 0)
@@ -183,17 +183,102 @@ struct BlockMMA {
         for (int j = 0; j < TN; j++) {
           // Get accumulated result and associated offset in C
           thread const auto& accum = results[i * TN + j].thread_elements();
-          int offset = (i * TM_stride) * ldc + (j * TN_stride);
+          int offset = (i * TM_stride) * ldd + (j * TN_stride);
 
           // Apply epilogue and output C
           if (j * TN_stride < dst_tile_dims.x) {
-            C[offset] = Epilogue::apply(accum[0]);
+            D[offset] = Epilogue::apply(accum[0]);
           }
 
           if (j * TN_stride + 1 < dst_tile_dims.x) {
-            C[offset + 1] = Epilogue::apply(accum[1]);
+            D[offset + 1] = Epilogue::apply(accum[1]);
           }
         }
+      }
+    }
+  }
+
+  /* Apply epilogue */
+  template <typename UnaryEpilogue>
+  METAL_FUNC void apply_epilogue(thread const UnaryEpilogue& epilogue_op) {
+    // Loop over all simdgroup tiles
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        // Get accumulated result and associated offset in C
+        thread auto& accum = results[i * TN + j].thread_elements();
+
+        // Apply epilogue
+        accum[0] = epilogue_op.apply(accum[0]);
+        accum[1] = epilogue_op.apply(accum[1]);
+      }
+    }
+  }
+
+  /* Apply epilogue */
+  template <typename BinaryEpilogue>
+  METAL_FUNC void apply_epilogue(
+      const device U* C,
+      const int ldc,
+      const int fdc,
+      thread const BinaryEpilogue& epilogue_op) {
+    // Adjust for simdgroup and thread location
+    C += (sm + tm) * ldc + (tn + sn) * fdc;
+
+    // Loop over all simdgroup tiles
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        // Get accumulated result and associated offset in C
+        thread auto& accum = results[i * TN + j].thread_elements();
+        int offset_c = (i * TM_stride) * ldc + (j * TN_stride) * fdc;
+
+        // Apply epilogue
+        accum[0] = epilogue_op.apply(accum[0], C[offset_c]);
+        accum[1] = epilogue_op.apply(accum[1], C[offset_c + fdc]);
+      }
+    }
+  }
+
+  /* Apply epilogue */
+  template <typename BinaryEpilogue>
+  METAL_FUNC void apply_epilogue_safe(
+      const device U* C,
+      const int ldc,
+      const int fdc,
+      short2 dst_tile_dims,
+      thread const BinaryEpilogue& epilogue_op) {
+    // Adjust for simdgroup and thread location
+    C += (sm + tm) * ldc + (tn + sn) * fdc;
+    dst_tile_dims -= short2(tn + sn, sm + tm);
+
+    if (dst_tile_dims.x <= 0 || dst_tile_dims.y <= 0)
+      return;
+
+    // Loop over all simdgroup tiles
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        // Get accumulated result and associated offset in C
+        thread auto& accum = results[i * TN + j].thread_elements();
+        int offset_c = (i * TM_stride) * ldc + (j * TN_stride) * fdc;
+
+        // Read C
+        U c_elems[2] = {0};
+
+        if ((j * TN_stride + 1) < dst_tile_dims.x) {
+          c_elems[0] = C[offset_c];
+          c_elems[1] = C[offset_c + fdc];
+        } else if ((j * TN_stride) < dst_tile_dims.x) {
+          c_elems[0] = C[offset_c];
+        }
+
+        // Apply epilogue
+        accum[0] = epilogue_op.apply(accum[0], c_elems[0]);
+        accum[1] = epilogue_op.apply(accum[1], c_elems[1]);
       }
     }
   }

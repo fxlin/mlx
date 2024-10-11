@@ -1,5 +1,6 @@
 // Copyright © 2023 Apple Inc.
 #pragma once
+
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -8,6 +9,7 @@
 
 #include "mlx/allocator.h"
 #include "mlx/dtype.h"
+#include "mlx/event.h"
 
 namespace mlx::core {
 
@@ -31,7 +33,7 @@ class array {
   template <typename It>
   array(
       It data,
-      const std::vector<int>& shape,
+      std::vector<int> shape,
       Dtype dtype =
           TypeToDtype<typename std::iterator_traits<It>::value_type>());
 
@@ -47,13 +49,13 @@ class array {
   template <typename T>
   array(
       std::initializer_list<T> data,
-      const std::vector<int>& shape,
+      std::vector<int> shape,
       Dtype dtype = TypeToDtype<T>());
 
   /* Build an array from a buffer */
   array(
       allocator::Buffer data,
-      const std::vector<int>& shape,
+      std::vector<int> shape,
       Dtype dtype,
       deleter_t deleter = allocator::free);
 
@@ -71,32 +73,32 @@ class array {
       this->array_desc_ = other.array_desc_;
     }
     return *this;
-  };
+  }
 
   /** The size of the array's datatype in bytes. */
   size_t itemsize() const {
     return size_of(dtype());
-  };
+  }
 
   /** The number of elements in the array. */
   size_t size() const {
     return array_desc_->size;
-  };
+  }
 
   /** The number of bytes in the array. */
   size_t nbytes() const {
     return size() * itemsize();
-  };
+  }
 
   /** The number of dimensions of the array. */
   size_t ndim() const {
     return array_desc_->shape.size();
-  };
+  }
 
   /** The shape of the array as a vector of integers. */
   const std::vector<int>& shape() const {
     return array_desc_->shape;
-  };
+  }
 
   /**
    *  Get the size of the corresponding dimension.
@@ -105,17 +107,26 @@ class array {
    *  bounds checking. */
   int shape(int dim) const {
     return shape().at(dim < 0 ? dim + ndim() : dim);
-  };
+  }
 
   /** The strides of the array. */
   const std::vector<size_t>& strides() const {
     return array_desc_->strides;
-  };
+  }
+
+  /**
+   *  Get the stride of the corresponding dimension.
+   *
+   *  This function supports negative indexing and provides
+   *  bounds checking. */
+  size_t strides(int dim) const {
+    return strides().at(dim < 0 ? dim + ndim() : dim);
+  }
 
   /** Get the arrays data type. */
   Dtype dtype() const {
     return array_desc_->dtype;
-  };
+  }
 
   /** Evaluate the array. */
   void eval();
@@ -149,10 +160,10 @@ class array {
 
     friend bool operator==(const ArrayIterator& a, const ArrayIterator& b) {
       return a.arr.id() == b.arr.id() && a.idx == b.idx;
-    };
+    }
     friend bool operator!=(const ArrayIterator& a, const ArrayIterator& b) {
       return !(a == b);
-    };
+    }
 
    private:
     const array& arr;
@@ -173,21 +184,15 @@ class array {
    */
 
   array(
-      const std::vector<int>& shape,
-      Dtype dtype,
-      std::shared_ptr<Primitive> primitive,
-      const std::vector<array>& inputs);
-
-  array(
       std::vector<int> shape,
       Dtype dtype,
       std::shared_ptr<Primitive> primitive,
-      std::vector<array>&& inputs);
+      std::vector<array> inputs);
 
   static std::vector<array> make_arrays(
-      const std::vector<std::vector<int>>& shapes,
+      std::vector<std::vector<int>> shapes,
       const std::vector<Dtype>& dtypes,
-      std::shared_ptr<Primitive> primitive,
+      const std::shared_ptr<Primitive>& primitive,
       const std::vector<array>& inputs);
 
   /** A unique identifier for an array. */
@@ -204,7 +209,7 @@ class array {
     allocator::Buffer buffer;
     deleter_t d;
     Data(allocator::Buffer buffer, deleter_t d = allocator::free)
-        : buffer(buffer), d(d){};
+        : buffer(buffer), d(d) {}
     // Not copyable
     Data(const Data& d) = delete;
     Data& operator=(const Data& d) = delete;
@@ -214,33 +219,45 @@ class array {
   };
 
   struct Flags {
-    // True if there are no gaps in the underlying data. Each item
+    // True iff there are no gaps in the underlying data. Each item
     // in the underlying data buffer belongs to at least one index.
+    //
+    // True iff:
+    // prod(shape[i] for i in range(ndim) if strides[i] > 0) == data_size()
     bool contiguous : 1;
 
+    // True iff:
+    // strides[-1] == 1 and
+    // all(strides[i] == (shape[i+1]*strides[i+1]) or shape[i] == 1 for i in
+    // range(ndim - 1))
     bool row_contiguous : 1;
+
+    // True iff:
+    // strides[0] == 1 and
+    // all(strides[i] == (shape[i-1]*strides[i-1]) or shape[i] == 1 for i in
+    // range(1, ndim))
     bool col_contiguous : 1;
   };
 
   /** The array's primitive. */
   Primitive& primitive() const {
     return *(array_desc_->primitive);
-  };
+  }
 
   /** A shared pointer to the array's primitive. */
   std::shared_ptr<Primitive>& primitive_ptr() const {
     return array_desc_->primitive;
-  };
+  }
 
   /** Check if the array has an attached primitive or is a leaf node. */
   bool has_primitive() const {
     return array_desc_->primitive != nullptr;
-  };
+  }
 
   /** The array's inputs. */
   const std::vector<array>& inputs() const {
     return array_desc_->inputs;
-  };
+  }
 
   std::vector<array>& inputs() {
     return array_desc_->inputs;
@@ -254,7 +271,12 @@ class array {
   /** The array's siblings. */
   const std::vector<array>& siblings() const {
     return array_desc_->siblings;
-  };
+  }
+
+  /** The array's siblings. */
+  std::vector<array>& siblings() {
+    return array_desc_->siblings;
+  }
 
   void set_siblings(std::vector<array> siblings, uint16_t position) {
     array_desc_->siblings = std::move(siblings);
@@ -271,11 +293,6 @@ class array {
     outputs.push_back(*this);
     outputs.insert(outputs.end(), siblings().begin() + idx, siblings().end());
     return outputs;
-  };
-
-  /** The depth of the array in the graph. Evaluated arrays have depth 0. */
-  uint16_t graph_depth() const {
-    return array_desc_->depth;
   }
 
   /** Detach the array from the graph. */
@@ -284,19 +301,32 @@ class array {
   /** Get the Flags bit-field. */
   const Flags& flags() const {
     return array_desc_->flags;
-  };
+  }
 
-  /** The size (in elements) of the underlying buffer the array points to. */
+  /** The size (in elements) of the underlying buffer the array points to.
+   *
+   * This can be different than the actual size of the array if the array has
+   * been broadcast or irregularly strided.  If ``first`` is the offset into
+   * the data buffer of the first element of the array (i.e. the offset
+   * corresponding to ``arr[0, 0, ...]``) and last is the offset into the
+   * data buffer of the last element of the array (i.e. the offset
+   * corresponding to ``arr[-1, -1, ...]``) then ``data_size = last - first``.
+   * Note, ``data_size`` is in units of ``item_size`` (not bytes).
+   **/
   size_t data_size() const {
     return array_desc_->data_size;
-  };
+  }
 
   allocator::Buffer& buffer() {
     return array_desc_->data->buffer;
-  };
+  }
   const allocator::Buffer& buffer() const {
     return array_desc_->data->buffer;
-  };
+  }
+
+  size_t buffer_size() const {
+    return allocator::allocator().size(buffer());
+  }
 
   // Return a copy of the shared pointer
   // to the array::Data struct
@@ -307,16 +337,57 @@ class array {
   template <typename T>
   T* data() {
     return static_cast<T*>(array_desc_->data_ptr);
-  };
+  }
 
   template <typename T>
   const T* data() const {
     return static_cast<T*>(array_desc_->data_ptr);
+  }
+
+  enum Status {
+    // The ouptut of a computation which has not been scheduled.
+    // For example, the status of `x` in `auto x = a + b`.
+    unscheduled,
+
+    // The ouptut of a computation which has been scheduled but `eval_*` has
+    // not yet been called on the array's primitive. A possible
+    // status of `x` in `auto x = a + b; eval(x);`
+    scheduled,
+
+    // The array's `eval_*` function has been run, but the computation is not
+    // necessarily complete. The array will have memory allocated and if it is
+    // not a tracer then it will be detached from the graph.
+    evaluated,
+
+    // If the array is the output of a computation then the computation
+    // is complete. Constant arrays are always available (e.g. `array({1, 2,
+    // 3})`)
+    available
   };
 
-  // Check if the array has been evaluated
-  bool is_evaled() const {
-    return array_desc_->data != nullptr;
+  // Check if the array is safe to read.
+  bool is_available() const;
+
+  // Wait on the array to be available. After this `is_available` returns
+  // `true`.
+  void wait();
+
+  Status status() const {
+    return array_desc_->status;
+  }
+
+  void set_status(Status s) const {
+    array_desc_->status = s;
+  }
+
+  // Get the array's shared event
+  Event& event() const {
+    return array_desc_->event;
+  }
+
+  // Attach an event to a not yet evaluated array
+  void attach_event(Event e) const {
+    array_desc_->event = std::move(e);
   }
 
   // Mark the array as a tracer array (true) or not.
@@ -344,11 +415,20 @@ class array {
 
   void copy_shared_buffer(const array& other);
 
+  void move_shared_buffer(
+      array other,
+      const std::vector<size_t>& strides,
+      Flags flags,
+      size_t data_size,
+      size_t offset = 0);
+
   void move_shared_buffer(array other);
 
   void overwrite_descriptor(const array& other) {
     array_desc_ = other.array_desc_;
   }
+
+  ~array();
 
  private:
   // Initialize the arrays data
@@ -360,7 +440,12 @@ class array {
     std::vector<size_t> strides;
     size_t size;
     Dtype dtype;
-    std::shared_ptr<Primitive> primitive{nullptr};
+    std::shared_ptr<Primitive> primitive;
+
+    Status status;
+
+    // An event on the array used for synchronization
+    Event event;
 
     // Indicates an array is being used in a graph transform
     // and should not be detached from the graph
@@ -368,14 +453,12 @@ class array {
 
     // This is a shared pointer so that *different* arrays
     // can share the underlying data buffer.
-    std::shared_ptr<Data> data{nullptr};
+    std::shared_ptr<Data> data;
 
     // Properly offset data pointer
     void* data_ptr{nullptr};
 
     // The size in elements of the data buffer the array accesses
-    // This can be different than the actual size of the array if it
-    // has been broadcast or irregularly strided.
     size_t data_size;
 
     // Contains useful meta data about the array
@@ -388,29 +471,26 @@ class array {
     // The arrays position in the output list
     uint32_t position{0};
 
-    // The depth of the array in the graph.
-    uint16_t depth{0};
-
-    explicit ArrayDesc(const std::vector<int>& shape, Dtype dtype);
+    explicit ArrayDesc(std::vector<int> shape, Dtype dtype);
 
     explicit ArrayDesc(
-        const std::vector<int>& shape,
+        std::vector<int> shape,
         Dtype dtype,
         std::shared_ptr<Primitive> primitive,
-        const std::vector<array>& inputs);
+        std::vector<array> inputs);
 
-    explicit ArrayDesc(
-        std::vector<int>&& shape,
-        Dtype dtype,
-        std::shared_ptr<Primitive> primitive,
-        std::vector<array>&& inputs);
+    ~ArrayDesc();
+
+   private:
+    // Initialize size, strides, and other metadata
+    void init();
   };
 
   // The ArrayDesc contains the details of the materialized array including the
   // shape, strides, the data type. It also includes
   // the primitive which knows how to compute the array's data from its inputs
   // and the list of array's inputs for the primitive.
-  std::shared_ptr<ArrayDesc> array_desc_{nullptr};
+  std::shared_ptr<ArrayDesc> array_desc_;
 };
 
 template <typename T>
@@ -422,9 +502,9 @@ array::array(T val, Dtype dtype /* = TypeToDtype<T>() */)
 template <typename It>
 array::array(
   It data,
-  const std::vector<int>& shape,
+  std::vector<int> shape,
   Dtype dtype /* = TypeToDtype<typename std::iterator_traits<It>::value_type>() */) :
-    array_desc_(std::make_shared<ArrayDesc>(shape, dtype)) {
+    array_desc_(std::make_shared<ArrayDesc>(std::move(shape), dtype)) {
   init(data);
 }
 
@@ -441,9 +521,9 @@ array::array(
 template <typename T>
 array::array(
     std::initializer_list<T> data,
-    const std::vector<int>& shape,
+    std::vector<int> shape,
     Dtype dtype /* = TypeToDtype<T>() */)
-    : array_desc_(std::make_shared<ArrayDesc>(shape, dtype)) {
+    : array_desc_(std::make_shared<ArrayDesc>(std::move(shape), dtype)) {
   if (data.size() != size()) {
     throw std::invalid_argument(
         "Data size and provided shape mismatch in array construction.");
@@ -465,10 +545,11 @@ T array::item() const {
   if (size() != 1) {
     throw std::invalid_argument("item can only be called on arrays of size 1.");
   }
-  if (!is_evaled()) {
+  if (status() == Status::unscheduled) {
     throw std::invalid_argument(
         "item() const can only be called on evaled arrays");
   }
+  const_cast<array*>(this)->eval();
   return *data<T>();
 }
 
@@ -517,5 +598,16 @@ void array::init(It src) {
       break;
   }
 }
+
+/* Utilities for determining whether a template parameter is array. */
+template <typename T>
+inline constexpr bool is_array_v =
+    std::is_same_v<std::remove_cv_t<std::remove_reference_t<T>>, array>;
+
+template <typename... T>
+inline constexpr bool is_arrays_v = (is_array_v<T> && ...);
+
+template <typename... T>
+using enable_for_arrays_t = typename std::enable_if_t<is_arrays_v<T...>>;
 
 } // namespace mlx::core

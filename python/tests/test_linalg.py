@@ -120,6 +120,154 @@ class TestLinalg(mlx_tests.MLXTestCase):
             self.assertTrue(mx.allclose(out, mx.eye(2), rtol=1e-5, atol=1e-7))
             self.assertTrue(mx.allclose(mx.tril(r, -1), mx.zeros_like(r)))
 
+    def test_svd_decomposition(self):
+        A = mx.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]], dtype=mx.float32)
+        U, S, Vt = mx.linalg.svd(A, stream=mx.cpu)
+        self.assertTrue(
+            mx.allclose(U[:, : len(S)] @ mx.diag(S) @ Vt, A, rtol=1e-5, atol=1e-7)
+        )
+
+        # Multiple matrices
+        B = A + 10.0
+        AB = mx.stack([A, B])
+        Us, Ss, Vts = mx.linalg.svd(AB, stream=mx.cpu)
+        for M, U, S, Vt in zip([A, B], Us, Ss, Vts):
+            self.assertTrue(
+                mx.allclose(U[:, : len(S)] @ mx.diag(S) @ Vt, M, rtol=1e-5, atol=1e-7)
+            )
+
+    def test_inverse(self):
+        A = mx.array([[1, 2, 3], [6, -5, 4], [-9, 8, 7]], dtype=mx.float32)
+        A_inv = mx.linalg.inv(A, stream=mx.cpu)
+        self.assertTrue(mx.allclose(A @ A_inv, mx.eye(A.shape[0]), rtol=0, atol=1e-6))
+
+        # Multiple matrices
+        B = A - 100
+        AB = mx.stack([A, B])
+        invs = mx.linalg.inv(AB, stream=mx.cpu)
+        for M, M_inv in zip(AB, invs):
+            self.assertTrue(
+                mx.allclose(M @ M_inv, mx.eye(M.shape[0]), rtol=0, atol=1e-5)
+            )
+
+    def test_tri_inverse(self):
+        for upper in (False, True):
+            A = mx.array([[1, 0, 0], [6, -5, 0], [-9, 8, 7]], dtype=mx.float32)
+            B = mx.array([[7, 0, 0], [3, -2, 0], [1, 8, 3]], dtype=mx.float32)
+            if upper:
+                A = A.T
+                B = B.T
+            AB = mx.stack([A, B])
+            invs = mx.linalg.tri_inv(AB, upper=upper, stream=mx.cpu)
+            for M, M_inv in zip(AB, invs):
+                self.assertTrue(
+                    mx.allclose(M @ M_inv, mx.eye(M.shape[0]), rtol=0, atol=1e-5)
+                )
+
+    def test_cholesky(self):
+        sqrtA = mx.array(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=mx.float32
+        )
+        A = sqrtA.T @ sqrtA / 81
+        L = mx.linalg.cholesky(A, stream=mx.cpu)
+        U = mx.linalg.cholesky(A, upper=True, stream=mx.cpu)
+        self.assertTrue(mx.allclose(L @ L.T, A, rtol=1e-5, atol=1e-7))
+        self.assertTrue(mx.allclose(U.T @ U, A, rtol=1e-5, atol=1e-7))
+
+        # Multiple matrices
+        B = A + 1 / 9
+        AB = mx.stack([A, B])
+        Ls = mx.linalg.cholesky(AB, stream=mx.cpu)
+        for M, L in zip(AB, Ls):
+            self.assertTrue(mx.allclose(L @ L.T, M, rtol=1e-5, atol=1e-7))
+
+    def test_pseudo_inverse(self):
+        A = mx.array([[1, 2, 3], [6, -5, 4], [-9, 8, 7]], dtype=mx.float32)
+        A_plus = mx.linalg.pinv(A, stream=mx.cpu)
+        self.assertTrue(mx.allclose(A @ A_plus @ A, A, rtol=0, atol=1e-5))
+
+        # Multiple matrices
+        B = A - 100
+        AB = mx.stack([A, B])
+        pinvs = mx.linalg.pinv(AB, stream=mx.cpu)
+        for M, M_plus in zip(AB, pinvs):
+            self.assertTrue(mx.allclose(M @ M_plus @ M, M, rtol=0, atol=1e-3))
+
+    def test_cholesky_inv(self):
+        mx.random.seed(7)
+
+        sqrtA = mx.array(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=mx.float32
+        )
+        A = sqrtA.T @ sqrtA / 81
+
+        N = 3
+        A = mx.random.uniform(shape=(N, N))
+        A = A @ A.T
+
+        for upper in (False, True):
+            L = mx.linalg.cholesky(A, upper=upper, stream=mx.cpu)
+            A_inv = mx.linalg.cholesky_inv(L, upper=upper, stream=mx.cpu)
+            self.assertTrue(mx.allclose(A @ A_inv, mx.eye(N), atol=1e-4))
+
+        # Multiple matrices
+        B = A + 1 / 9
+        AB = mx.stack([A, B])
+        Ls = mx.linalg.cholesky(AB, stream=mx.cpu)
+        for upper in (False, True):
+            Ls = mx.linalg.cholesky(AB, upper=upper, stream=mx.cpu)
+            AB_inv = mx.linalg.cholesky_inv(Ls, upper=upper, stream=mx.cpu)
+            for M, M_inv in zip(AB, AB_inv):
+                self.assertTrue(mx.allclose(M @ M_inv, mx.eye(N), atol=1e-4))
+
+    def test_cross_product(self):
+        a = mx.array([1.0, 2.0, 3.0])
+        b = mx.array([4.0, 5.0, 6.0])
+        result = mx.linalg.cross(a, b)
+        expected = np.cross(a, b)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Test with negative values
+        a = mx.array([-1.0, -2.0, -3.0])
+        b = mx.array([4.0, -5.0, 6.0])
+        result = mx.linalg.cross(a, b)
+        expected = np.cross(a, b)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Test with integer values
+        a = mx.array([1, 2, 3])
+        b = mx.array([4, 5, 6])
+        result = mx.linalg.cross(a, b)
+        expected = np.cross(a, b)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Test with 2D arrays and axis parameter
+        a = mx.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        b = mx.array([[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]])
+        result = mx.linalg.cross(a, b, axis=1)
+        expected = np.cross(a, b, axis=1)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Test with broadcast
+        a = mx.random.uniform(shape=(2, 1, 3))
+        b = mx.random.uniform(shape=(1, 2, 3))
+        result = mx.linalg.cross(a, b)
+        expected = np.cross(a, b)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Type promotion
+        a = mx.array([1.0, 2.0, 3.0])
+        b = mx.array([4, 5, 6])
+        result = mx.linalg.cross(a, b)
+        expected = np.cross(a, b)
+        self.assertTrue(np.allclose(result, expected))
+
+        # Test with incorrect vector size (should raise an exception)
+        a = mx.array([1.0])
+        b = mx.array([4.0])
+        with self.assertRaises(ValueError):
+            mx.linalg.cross(a, b)
+
 
 if __name__ == "__main__":
     unittest.main()

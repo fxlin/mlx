@@ -1,4 +1,4 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #include <algorithm>
 #include <cassert>
@@ -8,9 +8,9 @@
 
 #include "mlx/allocator.h"
 #include "mlx/backend/common/arange.h"
-#include "mlx/backend/common/binary.h"
 #include "mlx/backend/common/copy.h"
 #include "mlx/backend/common/ops.h"
+#include "mlx/backend/common/slicing.h"
 #include "mlx/backend/common/threefry.h"
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/common/utils.h"
@@ -22,7 +22,7 @@ namespace mlx::core {
 void Abs::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   auto& in = inputs[0];
-  if (is_unsigned(in.dtype())) {
+  if (issubdtype(in.dtype(), unsignedinteger)) {
     // No-op for unsigned types
     out.copy_shared_buffer(in);
   } else {
@@ -37,7 +37,7 @@ void Arange::eval(const std::vector<array>& inputs, array& out) {
 void ArcCos::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcCos());
   } else {
     throw std::invalid_argument(
@@ -49,7 +49,7 @@ void ArcCos::eval(const std::vector<array>& inputs, array& out) {
 void ArcCosh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcCosh());
   } else {
     throw std::invalid_argument(
@@ -61,7 +61,7 @@ void ArcCosh::eval(const std::vector<array>& inputs, array& out) {
 void ArcSin::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcSin());
   } else {
     throw std::invalid_argument(
@@ -73,7 +73,7 @@ void ArcSin::eval(const std::vector<array>& inputs, array& out) {
 void ArcSinh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcSinh());
   } else {
     throw std::invalid_argument(
@@ -85,7 +85,7 @@ void ArcSinh::eval(const std::vector<array>& inputs, array& out) {
 void ArcTan::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcTan());
   } else {
     throw std::invalid_argument(
@@ -97,7 +97,7 @@ void ArcTan::eval(const std::vector<array>& inputs, array& out) {
 void ArcTanh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::ArcTanh());
   } else {
     throw std::invalid_argument(
@@ -113,65 +113,10 @@ void AsType::eval(const std::vector<array>& inputs, array& out) {
   copy(in, out, ctype);
 }
 
-void AsStrided::eval(const std::vector<array>& inputs, array& out) {
-  assert(inputs.size() == 1);
-
-  auto& in = inputs[0];
-
-  if (!in.flags().row_contiguous) {
-    // Just ensuring that inputs[0] came from the ops which would ensure the
-    // input is row contiguous.
-    throw std::runtime_error(
-        "AsStrided must be used with row contiguous arrays only.");
-  }
-
-  // Compute the flags given the shape and strides
-  bool row_contiguous = true, col_contiguous = true;
-  size_t r = 1, c = 1;
-  for (int i = strides_.size() - 1, j = 0; i >= 0; i--, j++) {
-    row_contiguous &= (r == strides_[i]) || (shape_[i] == 1);
-    col_contiguous &= (c == strides_[j]) || (shape_[j] == 1);
-    r *= shape_[i];
-    c *= shape_[j];
-  }
-  auto flags = in.flags();
-  // TODO: Compute the contiguous flag in a better way cause now we are
-  //       unnecessarily strict.
-  flags.contiguous = row_contiguous || col_contiguous;
-  flags.row_contiguous = row_contiguous;
-  flags.col_contiguous = col_contiguous;
-
-  // There is no easy way to compute the actual data size so we use out.size().
-  // The contiguous flag will almost certainly not be set so no code should
-  // rely on data_size anyway.
-  size_t data_size = out.size();
-
-  return out.copy_shared_buffer(in, strides_, flags, data_size, offset_);
-}
-
-void Broadcast::eval(const std::vector<array>& inputs, array& out) {
-  assert(inputs.size() == 1);
-  const auto& in = inputs[0];
-  if (out.size() == 0) {
-    out.set_data(nullptr);
-    return;
-  }
-  std::vector<size_t> strides(out.ndim(), 0);
-  int diff = out.ndim() - in.ndim();
-  for (int i = in.ndim() - 1; i >= 0; --i) {
-    strides[i + diff] = (in.shape()[i] == 1) ? 0 : in.strides()[i];
-  }
-  auto flags = in.flags();
-  if (out.size() > in.size()) {
-    flags.row_contiguous = flags.col_contiguous = false;
-  }
-  out.copy_shared_buffer(in, strides, flags, in.data_size());
-}
-
 void Ceil::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   auto& in = inputs[0];
-  if (not is_integral(in.dtype())) {
+  if (issubdtype(in.dtype(), inexact)) {
     unary_fp(in, out, detail::Ceil());
   } else {
     // No-op integer types
@@ -203,15 +148,21 @@ void Concatenate::eval(const std::vector<array>& inputs, array& out) {
   }
 }
 
-void Copy::eval(const std::vector<array>& inputs, array& out) {
+void Conjugate::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
-  out.copy_shared_buffer(inputs[0]);
+  const auto& in = inputs[0];
+  if (out.dtype() == complex64) {
+    unary_fp(in, out, detail::Conjugate());
+  } else {
+    throw std::invalid_argument(
+        "[conjugate] conjugate must be called on complex input.");
+  }
 }
 
 void Cos::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Cos());
   } else {
     throw std::invalid_argument(
@@ -223,31 +174,12 @@ void Cos::eval(const std::vector<array>& inputs, array& out) {
 void Cosh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Cosh());
   } else {
     throw std::invalid_argument(
         "[cosh] Cannot compute hyperbolic cosine of elements in array"
         " with non floating point type.");
-  }
-}
-
-void CustomVJP::eval(
-    const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  assert(inputs.size() > outputs.size());
-  for (int i = 0, j = inputs.size() - outputs.size(); i < outputs.size();
-       i++, j++) {
-    outputs[i].copy_shared_buffer(inputs[j]);
-  }
-}
-
-void Depends::eval(
-    const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  assert(inputs.size() > outputs.size());
-  for (int i = 0; i < outputs.size(); i++) {
-    outputs[i].copy_shared_buffer(inputs[i]);
   }
 }
 
@@ -294,7 +226,7 @@ void ErfInv::eval(const std::vector<array>& inputs, array& out) {
 void Exp::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Exp());
   } else {
     throw std::invalid_argument(
@@ -303,10 +235,22 @@ void Exp::eval(const std::vector<array>& inputs, array& out) {
   }
 }
 
+void Expm1::eval(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 1);
+  const auto& in = inputs[0];
+  if (issubdtype(out.dtype(), inexact)) {
+    unary_fp(in, out, detail::Expm1());
+  } else {
+    throw std::invalid_argument(
+        "[expm1] Cannot exponentiate elements in array"
+        " with non floating point type.");
+  }
+}
+
 void Floor::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   auto& in = inputs[0];
-  if (not is_integral(in.dtype())) {
+  if (issubdtype(in.dtype(), inexact)) {
     unary_fp(in, out, detail::Floor());
   } else {
     // No-op integer types
@@ -332,7 +276,7 @@ void Full::eval(const std::vector<array>& inputs, array& out) {
 void Log::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     switch (base_) {
       case Base::e:
         unary_fp(in, out, detail::Log());
@@ -354,7 +298,7 @@ void Log::eval(const std::vector<array>& inputs, array& out) {
 void Log1p::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Log1p());
   } else {
     throw std::invalid_argument(
@@ -367,20 +311,6 @@ void LogicalNot::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   auto& in = inputs[0];
   unary(in, out, detail::LogicalNot());
-}
-
-void LogicalAnd::eval(const std::vector<array>& inputs, array& out) {
-  assert(inputs.size() == 2); // LogicalAnd requires two input arrays
-  auto& in1 = inputs[0];
-  auto& in2 = inputs[1];
-  binary(in1, in2, out, detail::LogicalAnd());
-}
-
-void LogicalOr::eval(const std::vector<array>& inputs, array& out) {
-  assert(inputs.size() == 2); // LogicalOr requires two input arrays
-  auto& in1 = inputs[0];
-  auto& in2 = inputs[1];
-  binary(in1, in2, out, detail::LogicalOr());
 }
 
 void Negative::eval(const std::vector<array>& inputs, array& out) {
@@ -471,24 +401,21 @@ void RandomBits::eval(const std::vector<array>& inputs, array& out) {
 void Reshape::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (in.flags().row_contiguous) {
-    // For row contiguous reshapes:
-    // - Shallow copy the buffer
-    // - If reshaping into a vector (all singleton dimensions except one) it
-    //    becomes col contiguous again.
-    auto flags = in.flags();
-    auto max_dim = std::max_element(out.shape().begin(), out.shape().end());
-    flags.col_contiguous = out.size() <= 1 || out.size() == *max_dim;
-    out.copy_shared_buffer(in, out.strides(), flags, in.data_size());
+
+  auto [copy_necessary, out_strides] = prepare_reshape(in, out);
+
+  if (copy_necessary) {
+    out.set_data(allocator::malloc_or_wait(out.nbytes()));
+    copy_inplace(in, out, CopyType::General);
   } else {
-    copy(in, out, in.data_size() == 1 ? CopyType::Scalar : CopyType::General);
+    shared_buffer_reshape(in, out_strides, out);
   }
 }
 
 void Round::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   auto& in = inputs[0];
-  if (not is_integral(in.dtype())) {
+  if (issubdtype(in.dtype(), inexact)) {
     unary_fp(in, out, detail::Round());
   } else {
     // No-op integer types
@@ -499,7 +426,7 @@ void Round::eval(const std::vector<array>& inputs, array& out) {
 void Sigmoid::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Sigmoid());
   } else {
     throw std::invalid_argument(
@@ -521,7 +448,7 @@ void Sign::eval(const std::vector<array>& inputs, array& out) {
 void Sin::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Sin());
   } else {
     throw std::invalid_argument(
@@ -533,7 +460,7 @@ void Sin::eval(const std::vector<array>& inputs, array& out) {
 void Sinh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Sinh());
   } else {
     throw std::invalid_argument(
@@ -548,96 +475,75 @@ void Slice::eval(const std::vector<array>& inputs, array& out) {
     out.set_data(nullptr);
     return;
   }
+
   auto& in = inputs[0];
-  auto strides = in.strides();
-  auto flags = in.flags();
-  size_t data_offset = 0;
-  for (int i = 0; i < in.ndim(); ++i) {
-    data_offset += start_indices_[i] * in.strides()[i];
-    strides[i] *= strides_[i];
-  }
 
-  // Compute row/col contiguity
-  size_t data_size = 1;
-  size_t f_stride = 1;
-  size_t b_stride = 1;
-  flags.row_contiguous = true;
-  flags.col_contiguous = true;
-  for (int i = 0, ri = out.ndim() - 1; ri >= 0; i++, ri--) {
-    flags.col_contiguous &= strides[i] == f_stride || out.shape(i) == 1;
-    flags.row_contiguous &= strides[ri] == b_stride || out.shape(ri) == 1;
-    f_stride *= out.shape(i);
-    b_stride *= out.shape(ri);
-    if (strides[i] > 0) {
-      data_size *= out.shape(i);
-    }
-  }
+  // Calculate out strides, initial offset and if copy needs to be made
+  auto [copy_needed, data_offset, inp_strides] =
+      prepare_slice(in, start_indices_, strides_);
 
-  if (data_size == 1) {
-    // Broadcasted scalar array is contiguous.
-    flags.contiguous = true;
-  } else if (data_size == in.data_size()) {
-    // Means we sliced a broadcasted dimension so leave the "no holes" flag
-    // alone.
+  // Do copy if needed
+  if (copy_needed) {
+    out.set_data(allocator::malloc_or_wait(out.nbytes()));
+    std::vector<int64_t> ostrides{out.strides().begin(), out.strides().end()};
+    copy_inplace<int64_t>(
+        /* const array& src = */ in,
+        /* array& dst = */ out,
+        /* const std::vector<int>& data_shape = */ out.shape(),
+        /* const std::vector<stride_t>& i_strides = */ inp_strides,
+        /* const std::vector<stride_t>& o_strides = */ ostrides,
+        /* int64_t i_offset = */ data_offset,
+        /* int64_t o_offset = */ 0,
+        /* CopyType ctype = */ CopyType::General);
   } else {
-    // We sliced something. So either we are row or col contiguous or we
-    // punched a hole.
-    flags.contiguous &= flags.row_contiguous || flags.col_contiguous;
-  }
-
-  out.copy_shared_buffer(in, strides, flags, data_size, data_offset);
-}
-
-void Split::eval(
-    const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  assert(inputs.size() == 1);
-
-  auto& in = inputs[0];
-
-  auto compute_new_flags = [](const auto& shape,
-                              const auto& strides,
-                              size_t in_data_size,
-                              auto flags) {
-    size_t data_size = 1;
-    size_t f_stride = 1;
-    size_t b_stride = 1;
-    flags.row_contiguous = true;
-    flags.col_contiguous = true;
-    for (int i = 0, ri = shape.size() - 1; ri >= 0; i++, ri--) {
-      flags.col_contiguous &= strides[i] == f_stride || shape[i] == 1;
-      flags.row_contiguous &= strides[ri] == b_stride || shape[ri] == 1;
-      f_stride *= shape[i];
-      b_stride *= shape[ri];
-      if (strides[i] > 0) {
-        data_size *= shape[i];
+    size_t data_end = 1;
+    for (int i = 0; i < end_indices_.size(); ++i) {
+      if (in.shape()[i] > 1) {
+        auto end_idx = start_indices_[i] + out.shape()[i] * strides_[i] - 1;
+        data_end += end_idx * in.strides()[i];
       }
     }
-
-    if (data_size == 1) {
-      // Broadcasted scalar array is contiguous.
-      flags.contiguous = true;
-    } else if (data_size == in_data_size) {
-      // Means we sliced a broadcasted dimension so leave the "no holes" flag
-      // alone.
-    } else {
-      // We sliced something. So either we are row or col contiguous or we
-      // punched a hole.
-      flags.contiguous &= flags.row_contiguous || flags.col_contiguous;
-    }
-
-    return std::pair<decltype(flags), size_t>{flags, data_size};
-  };
-
-  std::vector<int> indices(1, 0);
-  indices.insert(indices.end(), indices_.begin(), indices_.end());
-  for (int i = 0; i < indices.size(); i++) {
-    size_t offset = indices[i] * in.strides()[axis_];
-    auto [new_flags, data_size] = compute_new_flags(
-        outputs[i].shape(), in.strides(), in.data_size(), in.flags());
-    outputs[i].copy_shared_buffer(
-        in, in.strides(), new_flags, data_size, offset);
+    size_t data_size = data_end - data_offset;
+    std::vector<size_t> ostrides{inp_strides.begin(), inp_strides.end()};
+    shared_buffer_slice(in, ostrides, data_offset, data_size, out);
   }
+}
+
+void SliceUpdate::eval(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 2);
+  if (out.size() == 0) {
+    out.set_data(nullptr);
+    return;
+  }
+
+  auto& in = inputs[0];
+  auto& upd = inputs[1];
+
+  if (upd.size() == 0) {
+    out.copy_shared_buffer(in);
+    return;
+  }
+
+  // Check if materialization is needed
+  auto ctype = in.flags().contiguous && in.size() == in.data_size()
+      ? CopyType::Vector
+      : CopyType::General;
+  copy(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype);
+
+  // Calculate out strides, initial offset and if copy needs to be made
+  auto [data_offset, out_strides] = prepare_slice(out);
+
+  // Do copy
+  std::vector<int64_t> upd_strides{upd.strides().begin(), upd.strides().end()};
+  copy_inplace<int64_t>(
+      /* const array& src = */ upd,
+      /* array& dst = */ out,
+      /* const std::vector<int>& data_shape = */ upd.shape(),
+      /* const std::vector<stride_t>& i_strides = */ upd_strides,
+      /* const std::vector<stride_t>& o_strides = */ out_strides,
+      /* int64_t i_offset = */ 0,
+      /* int64_t o_offset = */ data_offset,
+      /* CopyType ctype = */ CopyType::GeneralGeneral);
 }
 
 void Square::eval(const std::vector<array>& inputs, array& out) {
@@ -656,15 +562,10 @@ void Sqrt::eval(const std::vector<array>& inputs, array& out) {
   }
 }
 
-void StopGradient::eval(const std::vector<array>& inputs, array& out) {
-  assert(inputs.size() == 1);
-  out.copy_shared_buffer(inputs[0]);
-}
-
 void Tan::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Tan());
   } else {
     throw std::invalid_argument(
@@ -676,7 +577,7 @@ void Tan::eval(const std::vector<array>& inputs, array& out) {
 void Tanh::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
-  if (is_floating_point(out.dtype())) {
+  if (issubdtype(out.dtype(), inexact)) {
     unary_fp(in, out, detail::Tanh());
   } else {
     throw std::invalid_argument(
@@ -685,38 +586,43 @@ void Tanh::eval(const std::vector<array>& inputs, array& out) {
   }
 }
 
-void Transpose::eval(const std::vector<array>& inputs, array& out) {
+void View::eval_cpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
-  std::vector<size_t> out_strides(out.ndim());
   auto& in = inputs[0];
-  for (int ax = 0; ax < axes_.size(); ++ax) {
-    out_strides[ax] = in.strides()[axes_[ax]];
-  }
-
-  // Conditions for {row/col}_contiguous
-  // - array must be contiguous (no gaps)
-  // - underlying buffer size should have the same size as the array
-  // - cumulative product of shapes is equal to the strides (we can ignore axes
-  //   with size == 1)
-  //   - in the forward direction (column contiguous)
-  //   - in the reverse direction (row contiguous)
-  // - vectors are both row and col contiguous (hence if both row/col are
-  //   true, they stay true)
-  auto flags = in.flags();
-  if (flags.contiguous && in.data_size() == in.size()) {
-    size_t f_stride = 1;
-    size_t b_stride = 1;
-    flags.col_contiguous = true;
-    flags.row_contiguous = true;
-    for (int i = 0, ri = out.ndim() - 1; i < out.ndim(); ++i, --ri) {
-      flags.col_contiguous &= (out_strides[i] == f_stride || out.shape(i) == 1);
-      f_stride *= out.shape(i);
-      flags.row_contiguous &=
-          (out_strides[ri] == b_stride || out.shape(ri) == 1);
-      b_stride *= out.shape(ri);
+  auto ibytes = size_of(in.dtype());
+  auto obytes = size_of(out.dtype());
+  // Conditions for buffer copying (disjunction):
+  // - type size is the same
+  // - type size is smaller and the last axis is contiguous
+  // - the entire array is row contiguous
+  if (ibytes == obytes || obytes < ibytes && in.strides().back() == 1 ||
+      in.flags().row_contiguous) {
+    auto strides = in.strides();
+    for (int i = 0; i < strides.size() - 1; ++i) {
+      strides[i] *= ibytes;
+      strides[i] /= obytes;
     }
+    out.copy_shared_buffer(
+        in, strides, in.flags(), in.data_size() * ibytes / obytes);
+  } else {
+    auto tmp = array(
+        in.shape(), in.dtype() == bool_ ? uint8 : in.dtype(), nullptr, {});
+    tmp.set_data(allocator::malloc_or_wait(tmp.nbytes()));
+    if (in.dtype() == bool_) {
+      auto in_tmp = array(in.shape(), uint8, nullptr, {});
+      in_tmp.copy_shared_buffer(in);
+      copy_inplace(in_tmp, tmp, CopyType::General);
+    } else {
+      copy_inplace(in, tmp, CopyType::General);
+    }
+
+    auto flags = out.flags();
+    flags.contiguous = true;
+    flags.row_contiguous = true;
+    auto max_dim = std::max_element(out.shape().begin(), out.shape().end());
+    flags.col_contiguous = out.size() <= 1 || out.size() == *max_dim;
+    out.move_shared_buffer(tmp, out.strides(), flags, out.size());
   }
-  out.copy_shared_buffer(in, out_strides, flags, in.data_size());
 }
 
 } // namespace mlx::core

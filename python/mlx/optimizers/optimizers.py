@@ -4,7 +4,8 @@ import math
 from typing import Callable, List, Optional, Tuple, Union
 
 import mlx.core as mx
-from mlx.utils import tree_map
+from mlx.nn import Module
+from mlx.utils import tree_map, tree_reduce
 
 
 class Optimizer:
@@ -17,7 +18,7 @@ class Optimizer:
         self._state = {"step": mx.array(0, mx.uint64)}
         self._schedulers = {k: v for k, v in (schedulers or {}).items()}
 
-    def update(self, model: "mlx.nn.Module", gradients: dict):
+    def update(self, model: Module, gradients: dict):
         """Apply the gradients to the parameters of the model and update the
         model with the new parameters.
 
@@ -48,8 +49,28 @@ class Optimizer:
             >>> optimizer.state.keys()
             dict_keys(['step', 'learning_rate', 'weight', 'bias'])
         """
-        self._state.update(tree_map(lambda x: {}, parameters))
-        tree_map(self.init_single, parameters, self._state)
+
+        # Iniatilize the optimizer state to match the parameter state
+        def update_state(params, state):
+            if isinstance(params, (list, tuple)):
+                state = list(state)
+                for i in range(len(state)):
+                    state[i] = update_state(params[i], state[i])
+                if len(state) != len(params):
+                    state.extend(tree_map(lambda x: {}, params[len(state) :]))
+                return type(params)(state)
+            elif isinstance(params, dict):
+                for k, v in params.items():
+                    if k not in state:
+                        state[k] = tree_map(lambda x: {}, v)
+                    else:
+                        state[k] = update_state(v, state[k])
+                return state
+            else:
+                return state
+
+        update_state(parameters, self._state)
+        tree_map(lambda p, s: s or self.init_single(p, s), parameters, self._state)
         self._initialized = True
 
     def init_single(self, parameter: mx.array, state: dict):
@@ -104,6 +125,7 @@ class Optimizer:
 
     @state.setter
     def state(self, state: dict):
+        self._initialized = False
         self._state = state
 
     @property
@@ -210,14 +232,19 @@ class RMSprop(Optimizer):
         w_{t+1} &= w_t - \lambda \frac{g_t}{\sqrt{v_{t+1}} + \epsilon}
 
     Args:
-        learning_rate (float): The learning rate :math:`\lambda`.
+        learning_rate (float or callable): The learning rate :math:`\lambda`.
         alpha (float, optional): The smoothing constant :math:`\alpha`.
           Default: ``0.99``
         eps (float, optional): The term :math:`\epsilon` added to the denominator
           to improve numerical stability. Default: ``1e-8``
     """
 
-    def __init__(self, learning_rate: float, alpha: float = 0.99, eps: float = 1e-8):
+    def __init__(
+        self,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
+        alpha: float = 0.99,
+        eps: float = 1e-8,
+    ):
         super().__init__()
 
         self._maybe_schedule("learning_rate", learning_rate)
@@ -264,12 +291,16 @@ class Adagrad(Optimizer):
         w_{t+1} &= w_t - \lambda \frac{g_t}{\sqrt{v_{t+1}} + \epsilon}
 
     Args:
-        learning_rate (float): The learning rate :math:`\lambda`.
+        learning_rate (float or callable): The learning rate :math:`\lambda`.
         eps (float, optional): The term :math:`\epsilon` added to the
           denominator to improve numerical stability. Default: ``1e-8``
     """
 
-    def __init__(self, learning_rate: float, eps: float = 1e-8):
+    def __init__(
+        self,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
+        eps: float = 1e-8,
+    ):
         super().__init__()
 
         self._maybe_schedule("learning_rate", learning_rate)
@@ -311,14 +342,19 @@ class AdaDelta(Optimizer):
         w_{t+1} &= w_t - \lambda \Delta w_{t+1}
 
     Args:
-        learning_rate (float): The learning rate :math:`\lambda`.
+        learning_rate (float or callable): The learning rate :math:`\lambda`.
         rho (float, optional): The coefficient :math:`\rho` used for computing a
             running average of squared gradients. Default: ``0.9``
         eps (float, optional): The term :math:`\epsilon` added to the denominator to improve
           numerical stability. Default: `1e-8`
     """
 
-    def __init__(self, learning_rate: float, rho: float = 0.9, eps: float = 1e-6):
+    def __init__(
+        self,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
+        rho: float = 0.9,
+        eps: float = 1e-6,
+    ):
         super().__init__()
 
         self._maybe_schedule("learning_rate", learning_rate)
@@ -374,7 +410,7 @@ class Adam(Optimizer):
         w_{t+1} &= w_t - \lambda \frac{m_{t+1}}{\sqrt{v_{t+1} + \epsilon}}
 
     Args:
-        learning_rate (float): The learning rate :math:`\lambda`.
+        learning_rate (float or callable): The learning rate :math:`\lambda`.
         betas (Tuple[float, float], optional): The coefficients
           :math:`(\beta_1, \beta_2)` used for computing running averages of the
           gradient and its square. Default: ``(0.9, 0.999)``
@@ -383,7 +419,10 @@ class Adam(Optimizer):
     """
 
     def __init__(
-        self, learning_rate: float, betas: List[float] = [0.9, 0.999], eps: float = 1e-8
+        self,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
+        betas: List[float] = [0.9, 0.999],
+        eps: float = 1e-8,
     ):
         super().__init__()
 
@@ -430,7 +469,7 @@ class AdamW(Adam):
         w_{t+1} &= w_t - \alpha (\frac{m_{t+1}}{\sqrt{v_{t+1} + \epsilon}} + \lambda w_t)
 
     Args:
-        learning_rate (float): The learning rate :math:`\alpha`.
+        learning_rate (float or callable): The learning rate :math:`\alpha`.
         betas (Tuple[float, float], optional): The coefficients
           :math:`(\beta_1, \beta_2)` used for computing running averages of the
           gradient and its square. Default: ``(0.9, 0.999)``
@@ -442,7 +481,7 @@ class AdamW(Adam):
 
     def __init__(
         self,
-        learning_rate: float,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
         betas: List[float] = [0.9, 0.999],
         eps: float = 1e-8,
         weight_decay: float = 0.01,
@@ -477,7 +516,7 @@ class Adamax(Adam):
         w_{t+1} &= w_t - \lambda \frac{m_{t+1}}{v_{t+1} + \epsilon}
 
     Args:
-        learning_rate (float): The learning rate :math:`\lambda`.
+        learning_rate (float or callable): The learning rate :math:`\lambda`.
         betas (Tuple[float, float], optional): The coefficients
           :math:`(\beta_1, \beta_2)` used for computing running averages of the
           gradient and its square. Default: ``(0.9, 0.999)``
@@ -486,7 +525,10 @@ class Adamax(Adam):
     """
 
     def __init__(
-        self, learning_rate: float, betas: List[float] = [0.9, 0.999], eps: float = 1e-8
+        self,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
+        betas: List[float] = [0.9, 0.999],
+        eps: float = 1e-8,
     ):
         super().__init__(learning_rate, betas, eps)
         if not 0.0 <= eps:
@@ -537,7 +579,7 @@ class Lion(Optimizer):
         w_{t + 1} &= w_t - \eta (\text{sign}(c_t) + \lambda w_t)
 
     Args:
-        learning_rate (float): The learning rate :math:`\eta`.
+        learning_rate (float or callable): The learning rate :math:`\eta`.
         betas (Tuple[float, float], optional): The coefficients
           :math:`(\beta_1, \beta_2)` used for computing the gradient
           momentum and update direction. Default: ``(0.9, 0.99)``
@@ -546,7 +588,7 @@ class Lion(Optimizer):
 
     def __init__(
         self,
-        learning_rate: float,
+        learning_rate: Union[float, Callable[[mx.array], mx.array]],
         betas: List[float] = [0.9, 0.99],
         weight_decay: float = 0.0,
     ):
@@ -583,7 +625,8 @@ class Adafactor(Optimizer):
     <https://arxiv.org/abs/1804.04235>`_
 
     Args:
-        learning_rate (float, optional): The learning rate. Default: ``None``.
+        learning_rate (float or callable, optional): The learning rate.
+            Default: ``None``.
         eps (tuple(float, float), optional): The first term :math:`\epsilon_1`
             added to the square of the gradients to improve numerical
             stability and the second term :math:`\epsilon_2` is used for
@@ -610,7 +653,7 @@ class Adafactor(Optimizer):
 
     def __init__(
         self,
-        learning_rate: Optional[float] = None,
+        learning_rate: Union[float, Callable[[mx.array], mx.array], None] = None,
         eps: Tuple[float, float] = (1e-30, 1e-3),
         clip_threshold: float = 1.0,
         decay_rate: float = -0.8,
@@ -715,3 +758,35 @@ class Adafactor(Optimizer):
         if self.weight_decay != 0:
             parameter += parameter * (-self.weight_decay * learning_rate)
         return parameter - update
+
+
+def clip_grad_norm(grads, max_norm):
+    """Clips the global norm of the gradients.
+
+    This function ensures that the global norm of the gradients does not exceed
+    ``max_norm``. It scales down the gradients proportionally if their norm is
+    greater than ``max_norm``.
+
+    Example:
+        >>> grads = {"w1": mx.array([2, 3]), "w2": mx.array([1])}
+        >>> clipped_grads, total_norm = clip_grad_norm(grads, max_norm=2.0)
+        >>> print(clipped_grads)
+        {"w1": mx.array([...]), "w2": mx.array([...])}
+
+    Args:
+        grads (dict): A dictionary containing the gradient arrays.
+        max_norm (float): The maximum allowed global norm of the gradients.
+
+    Returns:
+        (dict, float): The possibly rescaled gradients and the original
+        gradient norm.
+    """
+    norm_squared = tree_reduce(lambda acc, g: acc + g.square().sum(), grads, 0.0)
+    total_norm = mx.sqrt(norm_squared)
+    normalizer = max_norm / (total_norm + 1e-6)
+
+    def clipper(g):
+        return mx.where(total_norm < max_norm, g, g * normalizer)
+
+    clipped_grads = tree_map(clipper, grads)
+    return clipped_grads, total_norm

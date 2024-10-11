@@ -1,4 +1,4 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #include <cassert>
 #include <iostream>
@@ -43,7 +43,7 @@ array axpby(
   auto promoted_dtype = promote_types(x.dtype(), y.dtype());
 
   // Upcast to float32 for non-floating point inputs x and y
-  auto out_dtype = is_floating_point(promoted_dtype)
+  auto out_dtype = issubdtype(promoted_dtype, float32)
       ? promoted_dtype
       : promote_types(promoted_dtype, float32);
 
@@ -61,7 +61,7 @@ array axpby(
       /* const std::vector<int>& shape = */ out_shape,
       /* Dtype dtype = */ out_dtype,
       /* std::unique_ptr<Primitive> primitive = */
-      std::make_unique<Axpby>(to_stream(s), alpha, beta),
+      std::make_shared<Axpby>(to_stream(s), alpha, beta),
       /* const std::vector<array>& inputs = */ broadcasted_inputs);
 }
 
@@ -106,12 +106,12 @@ void axpby_impl(
 /** Fall back implementation for evaluation on CPU */
 void Axpby::eval(
     const std::vector<array>& inputs,
-    std::vector<array>& out_arr) {
-  auto out = out_arr[0];
+    std::vector<array>& outputs) {
   // Check the inputs (registered in the op while constructing the out array)
   assert(inputs.size() == 2);
   auto& x = inputs[0];
   auto& y = inputs[1];
+  auto& out = outputs[0];
 
   // Dispatch to the correct dtype
   if (out.dtype() == float32) {
@@ -150,11 +150,7 @@ void axpby_impl_accelerate(
   // The data in the output array is allocated to match the strides in y
   // such that x, y, and out are contiguous in the same mode and
   // no transposition is needed
-  out.set_data(
-      allocator::malloc_or_wait(y.data_size() * out.itemsize()),
-      y.data_size(),
-      y.strides(),
-      y.flags());
+  out.set_data(allocator::malloc_or_wait(out.nbytes()));
 
   // We then copy over the elements using the contiguous vector specialization
   copy_inplace(y, out, CopyType::Vector);
@@ -180,11 +176,11 @@ void axpby_impl_accelerate(
 /** Evaluate primitive on CPU using accelerate specializations */
 void Axpby::eval_cpu(
     const std::vector<array>& inputs,
-    std::vector<array>& outarr) {
-  auto out = outarr[0];
+    std::vector<array>& outputs) {
   assert(inputs.size() == 2);
   auto& x = inputs[0];
   auto& y = inputs[1];
+  auto& out = outputs[0];
 
   // Accelerate specialization for contiguous single precision float arrays
   if (out.dtype() == float32 &&
@@ -195,7 +191,7 @@ void Axpby::eval_cpu(
   }
 
   // Fall back to common backend if specializations are not available
-  eval(inputs, outarr);
+  eval(inputs, outputs);
 }
 
 #else // Accelerate not available
@@ -203,8 +199,8 @@ void Axpby::eval_cpu(
 /** Evaluate primitive on CPU falling back to common backend */
 void Axpby::eval_cpu(
     const std::vector<array>& inputs,
-    std::vector<array>& out) {
-  eval(inputs, out);
+    const std::vector<array>& outputs) {
+  eval(inputs, outputs);
 }
 
 #endif
@@ -218,12 +214,12 @@ void Axpby::eval_cpu(
 /** Evaluate primitive on GPU */
 void Axpby::eval_gpu(
     const std::vector<array>& inputs,
-    std::vector<array>& outarr) {
+    std::vector<array>& outputs) {
   // Prepare inputs
-  auto out = outarr[0];
   assert(inputs.size() == 2);
   auto& x = inputs[0];
   auto& y = inputs[1];
+  auto& out = outputs[0];
 
   // Each primitive carries the stream it should execute on
   // and each stream carries its device identifiers
@@ -253,15 +249,14 @@ void Axpby::eval_gpu(
   kname << (contiguous_kernel ? "contiguous_" : "general_");
   kname << type_to_name(out);
 
-  // Make sure the metal library is available and look for it
-  // in the same folder as this executable if needed
-  d.register_library("mlx_ext", metal::get_colocated_mtllib_path);
+  // Make sure the metal library is available
+  d.register_library("mlx_ext");
 
   // Make a kernel from this metal library
   auto kernel = d.get_kernel(kname.str(), "mlx_ext");
 
   // Prepare to encode kernel
-  auto compute_encoder = d.get_command_encoder(s.index);
+  auto& compute_encoder = d.get_command_encoder(s.index);
   compute_encoder->setComputePipelineState(kernel);
 
   // Kernel parameters are registered with buffer indices corresponding to
@@ -270,11 +265,11 @@ void Axpby::eval_gpu(
   size_t nelem = out.size();
 
   // Encode input arrays to kernel
-  set_array_buffer(compute_encoder, x, 0);
-  set_array_buffer(compute_encoder, y, 1);
+  compute_encoder.set_input_array(x, 0);
+  compute_encoder.set_input_array(y, 1);
 
   // Encode output arrays to kernel
-  set_array_buffer(compute_encoder, out, 2);
+  compute_encoder.set_output_array(out, 2);
 
   // Encode alpha and beta
   compute_encoder->setBytes(&alpha_, sizeof(float), 3);
@@ -300,7 +295,7 @@ void Axpby::eval_gpu(
 
   // Launch the grid with the given number of threads divided among
   // the given threadgroups
-  compute_encoder->dispatchThreads(grid_dims, group_dims);
+  compute_encoder.dispatchThreads(grid_dims, group_dims);
 }
 
 #else // Metal is not available

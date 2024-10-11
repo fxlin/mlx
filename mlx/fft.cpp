@@ -81,7 +81,8 @@ array fft_impl(
   if (any_greater) {
     // Pad with zeros
     auto tmp = zeros(in_shape, a.dtype(), s);
-    in = scatter(tmp, std::vector<array>{}, in, std::vector<int>{}, s);
+    std::vector<int> starts(in.ndim(), 0);
+    in = slice_update(tmp, in, starts, in.shape());
   }
 
   auto out_shape = in_shape;
@@ -95,7 +96,7 @@ array fft_impl(
   return array(
       out_shape,
       out_type,
-      std::make_unique<FFT>(to_stream(s), valid_axes, inverse, real),
+      std::make_shared<FFT>(to_stream(s), valid_axes, inverse, real),
       {astype(in, in_type, s)});
 }
 

@@ -1,24 +1,35 @@
 // Copyright © 2023-2024 Apple Inc.
-#include <algorithm>
-#include <cassert>
-#include <numeric>
-#include <sstream>
+#include <fmt/format.h>
 
-#include "mlx/backend/common/binary.h"
+#include "mlx/backend/common/compiled.h"
 #include "mlx/backend/metal/copy.h"
 #include "mlx/backend/metal/device.h"
-#include "mlx/backend/metal/kernels/defines.h"
+#include "mlx/backend/metal/jit/includes.h"
+#include "mlx/backend/metal/jit/indexing.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
 namespace mlx::core {
 
-namespace {
+constexpr int METAL_MAX_INDEX_ARRAYS = 20;
 
-static constexpr int METAL_MAX_INDEX_ARRAYS = 10;
-
-} // namespace
+std::pair<std::string, std::string> make_index_args(
+    const std::string& idx_type,
+    int nidx) {
+  std::ostringstream idx_args;
+  std::ostringstream idx_arr;
+  for (int i = 0; i < nidx; ++i) {
+    idx_args << fmt::format(
+        "const device {0} *idx{1} [[buffer({2})]],", idx_type, i, 20 + i);
+    idx_arr << fmt::format("idx{0}", i);
+    if (i < nidx - 1) {
+      idx_args << "\n";
+      idx_arr << ",";
+    }
+  }
+  return {idx_args.str(), idx_arr.str()};
+}
 
 void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& src = inputs[0];
@@ -42,15 +53,41 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   int idx_ndim = nidx ? inputs[1].ndim() : 0;
   size_t ndim = src.ndim();
 
-  std::ostringstream kname;
+  std::string lib_name;
+  std::string kernel_name;
   std::string idx_type_name = nidx ? type_to_name(inputs[1]) : "";
-  kname << "gather" << type_to_name(src) << idx_type_name << "_" << nidx;
-  if (idx_ndim <= 1) {
-    kname << "_" << idx_ndim;
+  {
+    std::ostringstream kname;
+    kname << "gather" << type_to_name(out) << idx_type_name << "_" << nidx
+          << "_" << idx_ndim;
+    lib_name = kname.str();
+    kernel_name = lib_name;
   }
 
-  auto compute_encoder = d.get_command_encoder(s.index);
-  auto kernel = d.get_kernel(kname.str());
+  auto lib = d.get_library(lib_name);
+  if (lib == nullptr) {
+    std::ostringstream kernel_source;
+    kernel_source << metal::utils() << metal::gather();
+    std::string out_type_str = get_type_string(out.dtype());
+    std::string idx_type_str =
+        nidx ? get_type_string(inputs[1].dtype()) : "bool";
+    auto [idx_args, idx_arr] = make_index_args(idx_type_str, nidx);
+
+    // Index dimension specializations
+    kernel_source << fmt::format(
+        gather_kernels,
+        type_to_name(out) + idx_type_name,
+        out_type_str,
+        idx_type_str,
+        nidx,
+        idx_args,
+        idx_arr,
+        idx_ndim);
+    lib = d.get_library(lib_name, kernel_source.str());
+  }
+
+  auto& compute_encoder = d.get_command_encoder(s.index);
+  auto kernel = d.get_kernel(kernel_name, lib);
   compute_encoder->setComputePipelineState(kernel);
 
   size_t slice_size = 1;
@@ -58,11 +95,21 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
     slice_size *= s;
   }
 
-  // Launch 2D grid of threads: indices x slice
-  size_t dim0 = out.size() / slice_size;
-  size_t dim1 = slice_size;
-  auto group_dims = get_block_dims(dim0, dim1, 1);
-  MTL::Size grid_dims = MTL::Size(dim0, dim1, 1);
+  // Launch 3D grid of threads
+  // First two dimensions for the indices, the last one for the slice
+  size_t dim0 = 1;
+  size_t dim1 = 1;
+  if (nidx) {
+    if (inputs[1].ndim() >= 1) {
+      dim0 = inputs[1].shape(0);
+    }
+    if (inputs[1].ndim() >= 2) {
+      dim1 = inputs[1].size() / dim0;
+    }
+  }
+  size_t dim2 = slice_size;
+  auto group_dims = get_block_dims(dim0, dim1, dim2);
+  MTL::Size grid_dims = MTL::Size(dim0, dim1, dim2);
 
   // Collect all idx shapes and strides into one place
   std::vector<int> idx_shapes;
@@ -81,8 +128,8 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   // Set all the buffers
-  set_array_buffer(compute_encoder, src, 0);
-  set_array_buffer(compute_encoder, out, 1);
+  compute_encoder.set_input_array(src, 0);
+  compute_encoder.set_output_array(out, 1);
 
   // Set source info
   compute_encoder->setBytes(src.shape().data(), ndim * sizeof(int), 2);
@@ -102,12 +149,12 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   compute_encoder->setBytes(&idx_ndim, sizeof(int), 9);
 
   // Set index buffers
-  for (int i = 1; i < nidx + 1; ++i) {
-    set_array_buffer(compute_encoder, inputs[i], 20 + i);
+  for (int i = 0; i < nidx; ++i) {
+    compute_encoder.set_input_array(inputs[i + 1], 20 + i);
   }
 
   // Launch grid
-  compute_encoder->dispatchThreads(grid_dims, group_dims);
+  compute_encoder.dispatchThreads(grid_dims, group_dims);
 }
 
 void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -139,10 +186,6 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = metal::device(s.device);
 
-  // Get kernel name
-  std::ostringstream kname;
-  std::string idx_type_name = nidx ? type_to_name(inputs[1]) : "";
-
   int idx_ndim = nidx ? inputs[1].ndim() : 0;
   bool index_nd1_specialization = (idx_ndim == 1);
 
@@ -159,32 +202,86 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
     index_nd1_specialization &= inputs[i].flags().row_contiguous;
   }
 
-  if (index_nd1_specialization) {
-    kname << "scatter_1d_index" << type_to_name(out) << idx_type_name;
-  } else {
-    kname << "scatter" << type_to_name(out) << idx_type_name;
-  }
+  std::string lib_name;
+  std::string kernel_name;
+  std::string idx_type_name = nidx ? type_to_name(inputs[1]) : "";
+  std::string op_name;
   switch (reduce_type_) {
     case Scatter::None:
-      kname << "_none";
+      op_name = "none";
       break;
     case Scatter::Sum:
-      kname << "_sum";
+      op_name = "sum";
       break;
     case Scatter::Prod:
-      kname << "_prod";
+      op_name = "prod";
       break;
     case Scatter::Max:
-      kname << "_max";
+      op_name = "max";
       break;
     case Scatter::Min:
-      kname << "_min";
+      op_name = "min";
       break;
   }
-  kname << "_" << nidx;
 
-  auto compute_encoder = d.get_command_encoder(s.index);
-  auto kernel = d.get_kernel(kname.str());
+  {
+    std::ostringstream kname;
+    if (index_nd1_specialization) {
+      kname << "scatter_1d_index" << type_to_name(out) << idx_type_name;
+    } else {
+      kname << "scatter" << type_to_name(out) << idx_type_name;
+    }
+    kname << "_" << op_name << "_" << nidx;
+    lib_name = kname.str();
+    kernel_name = kname.str();
+  }
+
+  auto lib = d.get_library(lib_name);
+  if (lib == nullptr) {
+    std::ostringstream kernel_source;
+    kernel_source << metal::utils() << metal::reduce_utils()
+                  << metal::scatter();
+
+    std::string out_type_str = get_type_string(out.dtype());
+    std::string idx_type_str =
+        nidx ? get_type_string(inputs[1].dtype()) : "bool";
+    std::string op_type;
+    switch (reduce_type_) {
+      case Scatter::None:
+        op_type = "None";
+        break;
+      case Scatter::Sum:
+        op_type = "Sum<{0}>";
+        break;
+      case Scatter::Prod:
+        op_type = "Prod<{0}>";
+        break;
+      case Scatter::Max:
+        op_type = "Max<{0}>";
+        break;
+      case Scatter::Min:
+        op_type = "Min<{0}>";
+        break;
+    }
+    if (reduce_type_ != Scatter::None) {
+      op_type = fmt::format(op_type, out_type_str);
+    }
+    auto [idx_args, idx_arr] = make_index_args(idx_type_str, nidx);
+
+    kernel_source << fmt::format(
+        scatter_kernels,
+        type_to_name(out) + idx_type_name + "_" + op_name,
+        out_type_str,
+        idx_type_str,
+        op_type,
+        nidx,
+        idx_args,
+        idx_arr);
+    lib = d.get_library(lib_name, kernel_source.str());
+  }
+
+  auto& compute_encoder = d.get_command_encoder(s.index);
+  auto kernel = d.get_kernel(kernel_name, lib);
 
   auto& upd = inputs.back();
   size_t nthreads = upd.size();
@@ -192,8 +289,8 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   compute_encoder->setComputePipelineState(kernel);
 
   // Set all the buffers
-  set_array_buffer(compute_encoder, upd, 1);
-  set_array_buffer(compute_encoder, out, 2);
+  compute_encoder.set_input_array(upd, 1);
+  compute_encoder.set_output_array(out, 2);
 
   // Set update info
   uint upd_ndim = upd.ndim();
@@ -201,25 +298,33 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   for (int i = idx_ndim; i < upd.ndim(); ++i) {
     upd_size *= upd.shape(i);
   }
-
   if (index_nd1_specialization) {
-    bool upd_col_contiguous = upd.flags().col_contiguous;
     compute_encoder->setBytes(
         out.shape().data(), out.shape().size() * sizeof(int), 3);
     compute_encoder->setBytes(
         out.strides().data(), out.strides().size() * sizeof(size_t), 4);
-    compute_encoder->setBytes(&upd_size, sizeof(size_t), 5);
-    compute_encoder->setBytes(&upd_col_contiguous, sizeof(bool), 6);
+
+    size_t out_ndim = out.ndim();
+    compute_encoder->setBytes(&out_ndim, sizeof(out_ndim), 5);
+    if (upd_ndim <= 1) {
+      // Placeholder so Metal doesn't compalain
+      int shape_ = 0;
+      compute_encoder->setBytes(&shape_, sizeof(int), 6);
+    } else {
+      compute_encoder->setBytes(upd.shape().data(), upd_ndim * sizeof(int), 6);
+    }
+    compute_encoder->setBytes(&upd_ndim, sizeof(size_t), 7);
+    compute_encoder->setBytes(&upd_size, sizeof(size_t), 8);
 
     // Set index buffers
-    for (int i = 1; i < nidx + 1; ++i) {
-      set_array_buffer(compute_encoder, inputs[i], 20 + i);
+    for (int i = 0; i < nidx; ++i) {
+      compute_encoder.set_input_array(inputs[i + 1], 20 + i);
     }
 
     // Launch grid
     MTL::Size grid_dims = MTL::Size(upd_size, nthreads / upd_size, 1);
     MTL::Size group_dims = get_block_dims(upd_size, nthreads / upd_size, 1);
-    compute_encoder->dispatchThreads(grid_dims, group_dims);
+    compute_encoder.dispatchThreads(grid_dims, group_dims);
 
   } else {
     // Collect all idx shapes and strides into one place
@@ -282,14 +387,14 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
     compute_encoder->setBytes(&idx_ndim, sizeof(int), 13);
 
     // Set index buffers
-    for (int i = 1; i < nidx + 1; ++i) {
-      set_array_buffer(compute_encoder, inputs[i], 20 + i);
+    for (int i = 0; i < nidx; ++i) {
+      compute_encoder.set_input_array(inputs[i + 1], 20 + i);
     }
 
     // Launch grid
     MTL::Size grid_dims = MTL::Size(upd_size, nthreads / upd_size, 1);
     MTL::Size group_dims = get_block_dims(upd_size, nthreads / upd_size, 1);
-    compute_encoder->dispatchThreads(grid_dims, group_dims);
+    compute_encoder.dispatchThreads(grid_dims, group_dims);
   }
 }
 

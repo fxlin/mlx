@@ -7,6 +7,7 @@
 
 #include "mlx/allocator.h"
 #include "mlx/compile.h"
+#include "mlx/compile_impl.h"
 #include "mlx/primitives.h"
 #include "mlx/transforms.h"
 #include "mlx/transforms_impl.h"
@@ -22,16 +23,17 @@ bool is_unary(const Primitive& p) {
       typeid(p) == typeid(ArcSinh) || typeid(p) == typeid(ArcTan) ||
       typeid(p) == typeid(ArcTanh) || typeid(p) == typeid(AsType) ||
       typeid(p) == typeid(Ceil) || typeid(p) == typeid(Cos) ||
-      typeid(p) == typeid(Cosh) || typeid(p) == typeid(Remainder) ||
-      typeid(p) == typeid(Erf) || typeid(p) == typeid(ErfInv) ||
-      typeid(p) == typeid(Exp) || typeid(p) == typeid(Floor) ||
-      typeid(p) == typeid(Log) || typeid(p) == typeid(Log1p) ||
-      typeid(p) == typeid(LogicalNot) || typeid(p) == typeid(Negative) ||
-      typeid(p) == typeid(Round) || typeid(p) == typeid(Sigmoid) ||
-      typeid(p) == typeid(Sign) || typeid(p) == typeid(Sin) ||
-      typeid(p) == typeid(Sinh) || typeid(p) == typeid(Square) ||
-      typeid(p) == typeid(Sqrt) || typeid(p) == typeid(Tan) ||
-      typeid(p) == typeid(Tanh));
+      typeid(p) == typeid(Conjugate) || typeid(p) == typeid(Cosh) ||
+      typeid(p) == typeid(Remainder) || typeid(p) == typeid(Erf) ||
+      typeid(p) == typeid(ErfInv) || typeid(p) == typeid(Exp) ||
+      typeid(p) == typeid(Floor) || typeid(p) == typeid(Log) ||
+      typeid(p) == typeid(Log1p) || typeid(p) == typeid(LogicalNot) ||
+      typeid(p) == typeid(Negative) || typeid(p) == typeid(Round) ||
+      typeid(p) == typeid(Sigmoid) || typeid(p) == typeid(Sign) ||
+      typeid(p) == typeid(Sin) || typeid(p) == typeid(Sinh) ||
+      typeid(p) == typeid(Square) || typeid(p) == typeid(Sqrt) ||
+      typeid(p) == typeid(Tan) || typeid(p) == typeid(Tanh) ||
+      typeid(p) == typeid(Expm1));
 }
 
 bool is_binary(const Primitive& p) {
@@ -44,7 +46,8 @@ bool is_binary(const Primitive& p) {
       typeid(p) == typeid(LogAddExp) || typeid(p) == typeid(Maximum) ||
       typeid(p) == typeid(Minimum) || typeid(p) == typeid(Multiply) ||
       typeid(p) == typeid(NotEqual) || typeid(p) == typeid(Power) ||
-      typeid(p) == typeid(Subtract));
+      typeid(p) == typeid(Subtract) || typeid(p) == typeid(BitwiseBinary) ||
+      typeid(p) == typeid(ArcTan2));
 }
 
 bool is_ternary(const Primitive& p) {
@@ -73,7 +76,7 @@ bool allows_shapeless(const Primitive& p) {
       is_noop(p) || is_reduction(p) || typeid(p) == typeid(Softmax) ||
       typeid(p) == typeid(Sort) || typeid(p) == typeid(ArgSort) ||
       typeid(p) == typeid(ArgPartition) || typeid(p) == typeid(Partition) ||
-      typeid(p) == typeid(Select);
+      typeid(p) == typeid(Select) || typeid(p) == typeid(NumberOfElements);
 }
 
 Compiled::Compiled(
@@ -161,44 +164,51 @@ CompileMode& compile_mode() {
   return compile_mode_;
 }
 
-using CompileFn = std::function<std::vector<array>(const std::vector<array>&)>;
 using ParentsMap =
     std::unordered_map<std::uintptr_t, std::vector<std::pair<array, int>>>;
 
+// Helper like below but only merges the two provided arrays. If the src has
+// siblings then these won't be merged to the dst.
+void merge_one(array& dst, array& src, ParentsMap& parents_map) {
+  auto src_parents = parents_map.find(src.id());
+  if (src_parents == parents_map.end()) {
+    return;
+  }
+  auto& pairs = parents_map[dst.id()];
+  for (auto& parent : src_parents->second) {
+    parent.first.inputs()[parent.second] = dst;
+    pairs.push_back(parent);
+  }
+  // Remove the source from the map to avoid fusing with it again
+  parents_map.erase(src_parents);
+}
+
 // Helper that merges two arrays in the graph by setting the parents of the
-// source to point to the destination
+// source to point to the destination. The arrays are assumed to be coming from
+// equivalent primitives so their siblings are merged as well.
 void merge(array& dst, array& src, ParentsMap& parents_map) {
   // Canonicalize the order of the primitives outputs
   auto sources = src.outputs();
   auto dests = dst.outputs();
   // For each src parent, point it to the corresponding dst
   for (int i = 0; i < sources.size(); ++i) {
-    auto src_parents = parents_map.find(sources[i].id());
-    if (src_parents == parents_map.end()) {
-      continue;
-    }
-    auto& pairs = parents_map[dests[i].id()];
-    for (auto& parent : src_parents->second) {
-      parent.first.inputs()[parent.second] = dests[i];
-      pairs.push_back(parent);
-    }
-    // Remove the source from the map to avoid fusing with it again
-    parents_map.erase(src_parents);
+    merge_one(dests[i], sources[i], parents_map);
   }
-};
+}
 
 template <typename T, typename... U>
-size_t getAddress(std::function<T(U...)> f) {
-  typedef T(fnType)(U...);
-  fnType** fnPointer = f.template target<fnType*>();
-  if (fnPointer == nullptr) {
+std::uintptr_t get_function_address(const std::function<T(U...)>& fun) {
+  using FunType = T (*)(U...);
+  const FunType* fun_ptr = fun.template target<FunType>();
+  if (fun_ptr == nullptr) {
     throw std::invalid_argument(
         "[compile] Cannot compile a non-addressable function.");
   }
-  return (size_t)*fnPointer;
+  return reinterpret_cast<std::uintptr_t>(*fun_ptr);
 }
 
-struct CompilerCache {
+class CompilerCache {
+ public:
   struct CacheEntry {
     std::vector<array> inputs;
     std::vector<array> outputs;
@@ -210,20 +220,20 @@ struct CompilerCache {
   // Returns a reference to a CacheEntry which can be updated
   // by the caller to avoid copying large tapes / inputs / outputs
   CacheEntry& find(
-      size_t fun_id,
+      std::uintptr_t fun_id,
       const std::vector<array>& inputs,
       bool shapeless,
       const std::vector<uint64_t>& constants) {
-    // Try to find the entry
-    auto [entry_it, inserted] = cache_.insert({fun_id, {}});
-    auto& entries = entry_it->second;
-    auto is_match = [shapeless](
-                        const std::vector<array>& in1,
-                        const std::vector<array>& in2) {
+    // Find the cache entries for |fun_id|.
+    std::vector<CacheEntry>& entries = cache_[fun_id];
+    // Compare if 2 arrays have same shape and dtype.
+    auto has_same_shape_and_dtype = [shapeless](
+                                        const std::vector<array>& in1,
+                                        const std::vector<array>& in2) {
       if (in1.size() != in2.size()) {
         return false;
       }
-      for (int i = 0; i < in1.size(); ++i) {
+      for (size_t i = 0; i < in1.size(); ++i) {
         if (in1[i].ndim() != in2[i].ndim()) {
           return false;
         }
@@ -236,24 +246,28 @@ struct CompilerCache {
       }
       return true;
     };
-
     // Loop over entries and check inputs match i.e. shapes and types must be
     // equal. Note this could get really slow if one compiles the same
     // function with many different shapes. May want to store entries in a
     // more easily searchable structure.
-    for (auto& entry : entries) {
+    for (CacheEntry& entry : entries) {
       // Check the inputs match and return if so
-      if (is_match(inputs, entry.inputs) && constants == entry.constants) {
+      if (has_same_shape_and_dtype(inputs, entry.inputs) &&
+          constants == entry.constants) {
         return entry;
       }
     }
     // Otherwise append a new cache entry
     entries.push_back(CacheEntry{});
     return entries.back();
-  };
+  }
 
-  void erase(size_t fun_id) {
+  void erase(std::uintptr_t fun_id) {
     cache_.erase(fun_id);
+  }
+
+  void clear() {
+    cache_.clear();
   }
 
  private:
@@ -262,8 +276,9 @@ struct CompilerCache {
     // initialized before the compiler cache
     allocator::allocator();
   }
+
   friend CompilerCache& compiler_cache();
-  std::unordered_map<size_t, std::vector<CacheEntry>> cache_;
+  std::unordered_map<std::uintptr_t, std::vector<CacheEntry>> cache_;
 };
 
 CompilerCache& compiler_cache() {
@@ -291,21 +306,27 @@ std::pair<std::vector<array>, std::vector<array>> compile_trace(
 // Traverses the graph to build a tape and a map of array ids to their parents
 std::pair<std::vector<array>, ParentsMap> compile_dfs(
     const std::vector<array>& inputs,
-    const std::vector<array>& outputs) {
+    const std::vector<array>& outputs,
+    const std::vector<array>& original_inputs) {
   std::function<void(const array&)> recurse;
   std::vector<array> tape;
   std::unordered_set<std::uintptr_t> input_set;
+  std::unordered_set<std::uintptr_t> original_input_set;
   std::unordered_map<std::uintptr_t, std::vector<std::pair<array, int>>>
       parents_map;
   for (int i = 0; i < inputs.size(); ++i) {
-    auto in = inputs[i];
-    input_set.insert(in.id());
+    input_set.insert(inputs[i].id());
+    original_input_set.insert(original_inputs[i].id());
   }
 
   // DFS the graph to build the tape, and log parents and scalars
   std::unordered_set<std::uintptr_t> cache;
   recurse = [&](const array& a) {
     auto id = a.id();
+    if (original_input_set.find(id) != original_input_set.end()) {
+      throw std::invalid_argument(
+          "[compile] Attempting to compile a function with uncaptured inputs is not allowed.");
+    }
     if (cache.find(id) != cache.end()) {
       return;
     }
@@ -343,12 +364,13 @@ void compile_simplify(
   // Helpers to identify identical scalars
   std::map<std::pair<uint64_t, Dtype::Val>, array> scalars;
   auto is_scalar = [](const array& a) {
-    return a.is_evaled() && a.ndim() == 0;
+    // Condition for when it's safe to read an array
+    return a.is_available() && a.ndim() == 0;
   };
   auto get_scalar_rep = [](const array& a) {
     uint64_t v = 0;
     int dtype;
-    switch (a.dtype().size) {
+    switch (a.dtype().size()) {
       case 1:
         v = *a.data<uint8_t>();
         break;
@@ -362,7 +384,7 @@ void compile_simplify(
         v = *a.data<uint64_t>();
         break;
     }
-    return std::make_pair(v, a.dtype().val);
+    return std::make_pair(v, a.dtype().val());
   };
 
   for (auto& a : tape) {
@@ -414,6 +436,11 @@ void compile_simplify(
   }
   tape = std::move(new_tape);
 
+  std::unordered_map<std::uintptr_t, uint32_t> tape_order;
+  for (uint32_t i = 0; i < tape.size(); ++i) {
+    tape_order.insert({tape[i].id(), i});
+  }
+
   std::unordered_set<uintptr_t> output_set;
   for (auto& o : outputs) {
     output_set.insert(o.id());
@@ -436,16 +463,23 @@ void compile_simplify(
               if (mask[j]) {
                 continue;
               }
-              auto& src = parents->second[j].first;
-              auto& dst = parents->second[i].first;
-              if (src.id() != dst.id() && array_equivalent(src, dst)) {
+              auto src_idx = j;
+              auto dst_idx = i;
+              if (tape_order[parents->second[src_idx].first.id()] <
+                  tape_order[parents->second[dst_idx].first.id()]) {
+                std::swap(src_idx, dst_idx);
+              }
+              auto& src = parents->second[src_idx].first;
+              auto& dst = parents->second[dst_idx].first;
+              if (src.id() != dst.id() && array_equivalent(src, dst) &&
+                  output_set.find(src.id()) == output_set.end()) {
                 merge(dst, src, parents_map);
-                mask[j] = true;
+                mask[src_idx] = true;
               }
             }
           }
           // Erase orphaned parents so we don't keep fusing with them
-          for (int i = N - 1; i > 0; --i) {
+          for (int i = N - 1; i >= 0; --i) {
             if (mask[i]) {
               parents->second.erase(parents->second.begin() + i);
             }
@@ -455,7 +489,6 @@ void compile_simplify(
           return output_set.find(a.id()) == output_set.end();
         }
       };
-
       bool discard = maybe_merge_parents(arr);
       for (auto& s : arr.siblings()) {
         discard &= maybe_merge_parents(s);
@@ -511,9 +544,14 @@ void compile_fuse(
     //  - Collect inputs to the new compiled primitive
     //  - Add fusable primitives to a tape in the correct order
 
-    std::function<void(const array&, int, const Stream&)> recurse;
+    std::function<void(
+        const array&, int, const Stream&, const std::vector<int>&)>
+        recurse;
     std::unordered_set<uintptr_t> cache;
-    recurse = [&](const array& a, int depth, const Stream& s) {
+    recurse = [&](const array& a,
+                  int depth,
+                  const Stream& s,
+                  const std::vector<int>& shape) {
       if (cache.find(a.id()) != cache.end()) {
         return;
       }
@@ -523,8 +561,10 @@ void compile_fuse(
       // - Constant input
       // - Stream mismatch
       // - Non fusable primitive
+      // - Is global output but has a different shape
       if (depth >= max_compile_depth || !a.has_primitive() ||
-          a.primitive().stream() != s || !is_fusable(a.primitive())) {
+          a.primitive().stream() != s || !is_fusable(a.primitive()) ||
+          (output_map.find(a.id()) != output_map.end() && a.shape() != shape)) {
         return;
       }
 
@@ -551,13 +591,13 @@ void compile_fuse(
       cache.insert({a.id()});
 
       for (auto& in : a.inputs()) {
-        recurse(in, depth + 1, s);
+        recurse(in, depth + 1, s, shape);
       }
     };
 
     if (arr.has_primitive()) {
       Stream s = arr.primitive().stream();
-      recurse(arr, 0, s);
+      recurse(arr, 0, s, arr.shape());
     }
 
     // Not worth fusing a single primitive
@@ -621,6 +661,10 @@ void compile_fuse(
     std::vector<std::vector<int>> shapes;
     std::vector<Dtype> types;
     for (auto& o : old_outputs) {
+      if (o.shape() != old_outputs.back().shape()) {
+        throw std::runtime_error(
+            "[compile] Compilation failed. Tried to fuse operations with different output shapes");
+      }
       shapes.push_back(o.shape());
       types.push_back(o.dtype());
     }
@@ -633,7 +677,7 @@ void compile_fuse(
       }
     }
     auto compiled_outputs = array::make_arrays(
-        shapes,
+        std::move(shapes),
         types,
         std::make_shared<Compiled>(
             old_outputs.back().primitive().stream(),
@@ -663,7 +707,7 @@ void compile_fuse(
     // - Update outputs parents to point to compiled outputs
     // - Update any overall graph outputs to be compiled outputs
     for (int o = 0; o < old_outputs.size(); ++o) {
-      merge(compiled_outputs[o], old_outputs[o], parents_map);
+      merge_one(compiled_outputs[o], old_outputs[o], parents_map);
       if (auto it = output_map.find(old_outputs[o].id());
           it != output_map.end()) {
         it->second = compiled_outputs[o];
@@ -726,8 +770,8 @@ std::vector<array> compile_replace(
             shapes.push_back(o.shape());
           }
         }
-        auto real_out =
-            array::make_arrays(shapes, types, a.primitive_ptr(), real_inputs);
+        auto real_out = array::make_arrays(
+            std::move(shapes), types, a.primitive_ptr(), real_inputs);
         for (int i = 0; i < trace_out.size(); ++i) {
           trace_to_real.insert({trace_out[i].id(), std::move(real_out[i])});
         }
@@ -762,10 +806,11 @@ void compile_validate_shapeless(const std::vector<array>& tape) {
 
 std::function<std::vector<array>(const std::vector<array>&)> compile(
     const std::function<std::vector<array>(const std::vector<array>&)>& fun,
-    size_t fun_id,
+    std::uintptr_t fun_id,
     bool shapeless /* = false */,
     std::vector<uint64_t> constants /* = {} */) {
-  if (compile_mode() == CompileMode::disabled) {
+  if (compile_mode() == CompileMode::disabled ||
+      !(compile_available_for_device(default_device()))) {
     return fun;
   }
   return [fun, fun_id, shapeless, constants = std::move(constants)](
@@ -794,7 +839,7 @@ std::function<std::vector<array>(const std::vector<array>&)> compile(
       std::unordered_map<uintptr_t, std::vector<std::pair<array, int>>>
           parents_map;
       std::tie(entry.tape, parents_map) =
-          compile_dfs(entry.inputs, entry.outputs);
+          compile_dfs(entry.inputs, entry.outputs, inputs);
 
       // Simplify the tape
       if (compile_mode() != CompileMode::no_simplify) {
@@ -820,8 +865,12 @@ std::function<std::vector<array>(const std::vector<array>&)> compile(
   };
 }
 
-void compile_erase(size_t fun_id) {
+void compile_erase(std::uintptr_t fun_id) {
   detail::compiler_cache().erase(fun_id);
+}
+
+void compile_clear_cache() {
+  detail::compiler_cache().clear();
 }
 
 } // namespace detail
@@ -832,7 +881,7 @@ std::function<std::vector<array>(const std::vector<array>&)> compile(
   if (detail::compile_mode() == CompileMode::disabled) {
     return fun;
   }
-  auto fun_id = detail::getAddress(fun);
+  auto fun_id = detail::get_function_address(fun);
   return detail::compile(fun, fun_id, shapeless);
 }
 

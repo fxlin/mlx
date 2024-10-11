@@ -134,7 +134,18 @@ class GenerateStubs(Command):
         pass
 
     def run(self) -> None:
-        subprocess.run(["pybind11-stubgen", "mlx.core", "-o", "python"])
+        out_path = "python/mlx/core"
+        stub_cmd = [
+            "python",
+            "-m",
+            "nanobind.stubgen",
+            "-m",
+            "mlx.core",
+        ]
+        subprocess.run(stub_cmd + ["-r", "-O", out_path])
+        # Run again without recursive to specify output file name
+        subprocess.run(["rm", f"{out_path}/mlx.pyi"])
+        subprocess.run(stub_cmd + ["-o", f"{out_path}/__init__.pyi"])
 
 
 # Read the content of README.md
@@ -152,7 +163,7 @@ if __name__ == "__main__":
 
     setup(
         name="mlx",
-        version=get_version("0.5.0"),
+        version=get_version("0.18.1"),
         author="MLX Contributors",
         author_email="mlx@group.apple.com",
         description="A framework for machine learning on Apple silicon.",
@@ -164,8 +175,14 @@ if __name__ == "__main__":
         package_data=package_data,
         include_package_data=True,
         extras_require={
-            "testing": ["numpy", "torch"],
-            "dev": ["pre-commit", "pybind11-stubgen"],
+            "dev": [
+                "nanobind==2.2.0",
+                "numpy",
+                "pre-commit",
+                "setuptools>=42",
+                "torch",
+                "typing_extensions",
+            ],
         },
         ext_modules=[CMakeExtension("mlx.core")],
         cmdclass={"build_ext": CMakeBuild, "generate_stubs": GenerateStubs},

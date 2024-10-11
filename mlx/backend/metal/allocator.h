@@ -1,4 +1,4 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #pragma once
 
@@ -19,11 +19,14 @@ class BufferCache {
  public:
   BufferCache(MTL::Device* device);
   ~BufferCache();
-  void clear();
 
   MTL::Buffer* reuse_from_cache(size_t size);
   void recycle_to_cache(MTL::Buffer* buf);
   void release_cached_buffers(size_t min_bytes_to_free);
+  size_t cache_size() {
+    return pool_size_;
+  }
+  void clear();
 
  private:
   struct BufferHolder {
@@ -39,7 +42,6 @@ class BufferCache {
   void remove_from_list(BufferHolder* to_remove);
 
   MTL::Device* device_;
-  std::mutex cache_mutex_;
 
   std::multimap<size_t, BufferHolder*> buffer_pool_;
   BufferHolder* head_;
@@ -54,6 +56,23 @@ class MetalAllocator : public allocator::Allocator {
  public:
   virtual Buffer malloc(size_t size, bool allow_swap = false) override;
   virtual void free(Buffer buffer) override;
+  virtual size_t size(Buffer buffer) const override;
+  size_t get_active_memory() {
+    return active_memory_;
+  };
+  size_t get_peak_memory() {
+    return peak_memory_;
+  };
+  void reset_peak_memory() {
+    std::unique_lock lk(mutex_);
+    peak_memory_ = 0;
+  };
+  size_t get_cache_memory() {
+    return buffer_cache_.cache_size();
+  };
+  size_t set_cache_limit(size_t limit);
+  size_t set_memory_limit(size_t limit, bool relaxed);
+  void clear_cache();
 
  private:
   MTL::Device* device_;
@@ -64,9 +83,14 @@ class MetalAllocator : public allocator::Allocator {
   BufferCache buffer_cache_;
 
   // Allocation stats
-  size_t peak_allocated_size_;
   size_t block_limit_;
   size_t gc_limit_;
+  size_t active_memory_{0};
+  size_t peak_memory_{0};
+  size_t max_pool_size_;
+  bool relaxed_{true};
+
+  std::mutex mutex_;
 };
 
 MetalAllocator& allocator();

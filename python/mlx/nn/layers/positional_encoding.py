@@ -44,9 +44,7 @@ class RoPE(Module):
         return f"{self.dims}, traditional={self.traditional}"
 
     def __call__(self, x, offset: int = 0):
-        shape = x.shape
-        x = mx.reshape(x, (-1, shape[-2], shape[-1]))
-        x = mx.fast.rope(
+        return mx.fast.rope(
             x,
             self.dims,
             traditional=self.traditional,
@@ -54,7 +52,6 @@ class RoPE(Module):
             scale=self.scale,
             offset=offset,
         )
-        return mx.reshape(x, shape)
 
 
 class SinusoidalPositionalEncoding(Module):
@@ -70,7 +67,7 @@ class SinusoidalPositionalEncoding(Module):
         max_freq (float, optional): The maximum frequency expected. Default:
             ``1``.
         scale (float, optional): A multiplicative scale for the embeddings.
-            Default: ``sqrt(dims//2)``.
+            Default: ``sqrt(2/dims)``.
         cos_first (bool, optional): If ``True`` embed using ``[cos(x); sin(x)]``
             instead of the reverse. Default: ``False``.
         full_turns (bool, optional): If ``True`` multiply the frequencies with

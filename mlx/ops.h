@@ -11,7 +11,10 @@
 
 namespace mlx::core {
 
-/** Creation operations */
+/**
+ * \defgroup ops Core array operations
+ * @{
+ */
 
 /**
  * A 1D array of numbers starting at `start` (optional),
@@ -41,40 +44,33 @@ array linspace(
     StreamOrDevice s = {});
 
 /** Convert an array to the given data type. */
-array astype(const array& a, Dtype dtype, StreamOrDevice s = {});
+array astype(array a, Dtype dtype, StreamOrDevice s = {});
 
 /** Create a view of an array with the given shape and strides. */
 array as_strided(
-    const array& a,
+    array a,
     std::vector<int> shape,
     std::vector<size_t> strides,
     size_t offset,
     StreamOrDevice s = {});
 
 /** Copy another array. */
-array copy(const array& a, StreamOrDevice s = {});
+array copy(array a, StreamOrDevice s = {});
 
 /** Fill an array of the given shape with the given value(s). */
 array full(
-    const std::vector<int>& shape,
-    const array& vals,
+    std::vector<int> shape,
+    array vals,
     Dtype dtype,
     StreamOrDevice s = {});
-array full(
-    const std::vector<int>& shape,
-    const array& vals,
-    StreamOrDevice s = {});
+array full(std::vector<int> shape, array vals, StreamOrDevice s = {});
 template <typename T>
-array full(
-    const std::vector<int>& shape,
-    T val,
-    Dtype dtype,
-    StreamOrDevice s = {}) {
-  return full(shape, array(val, dtype), to_stream(s));
+array full(std::vector<int> shape, T val, Dtype dtype, StreamOrDevice s = {}) {
+  return full(std::move(shape), array(val, dtype), to_stream(s));
 }
 template <typename T>
-array full(const std::vector<int>& shape, T val, StreamOrDevice s = {}) {
-  return full(shape, array(val), to_stream(s));
+array full(std::vector<int> shape, T val, StreamOrDevice s = {}) {
+  return full(std::move(shape), array(val), to_stream(s));
 }
 
 /** Fill an array of the given shape with zeros. */
@@ -122,8 +118,6 @@ inline array tri(int n, Dtype type, StreamOrDevice s = {}) {
 array tril(array x, int k = 0, StreamOrDevice s = {});
 array triu(array x, int k = 0, StreamOrDevice s = {});
 
-/** array manipulation */
-
 /** Reshape an array to the given shape. */
 array reshape(const array& a, std::vector<int> shape, StreamOrDevice s = {});
 
@@ -137,6 +131,12 @@ array flatten(
 /** Flatten the array to 1D. */
 array flatten(const array& a, StreamOrDevice s = {});
 
+/** Multiply the array by the Hadamard matrix of corresponding size. */
+array hadamard_transform(
+    const array& a,
+    std::optional<float> scale = std::nullopt,
+    StreamOrDevice s = {});
+
 /** Remove singleton dimensions at the given axes. */
 array squeeze(
     const array& a,
@@ -144,9 +144,7 @@ array squeeze(
     StreamOrDevice s = {});
 
 /** Remove singleton dimensions at the given axis. */
-inline array squeeze(const array& a, int axis, StreamOrDevice s = {}) {
-  return squeeze(a, std::vector<int>{axis}, s);
-}
+array squeeze(const array& a, int axis, StreamOrDevice s = {});
 
 /** Remove all singleton dimensions. */
 array squeeze(const array& a, StreamOrDevice s = {});
@@ -158,9 +156,7 @@ array expand_dims(
     StreamOrDevice s = {});
 
 /** Add a singleton dimension at the given axis. */
-inline array expand_dims(const array& a, int axis, StreamOrDevice s = {}) {
-  return expand_dims(a, std::vector<int>{axis}, s);
-}
+array expand_dims(const array& a, int axis, StreamOrDevice s = {});
 
 /** Slice an array. */
 array slice(
@@ -173,8 +169,25 @@ array slice(
 /** Slice an array with a stride of 1 in each dimension. */
 array slice(
     const array& a,
-    const std::vector<int>& start,
-    const std::vector<int>& stop,
+    std::vector<int> start,
+    std::vector<int> stop,
+    StreamOrDevice s = {});
+
+/** Update a slice from the source array */
+array slice_update(
+    const array& src,
+    const array& update,
+    std::vector<int> start,
+    std::vector<int> stop,
+    std::vector<int> strides,
+    StreamOrDevice s = {});
+
+/** Update a slice from the source array with stride 1 in each dimension */
+array slice_update(
+    const array& src,
+    const array& update,
+    std::vector<int> start,
+    std::vector<int> stop,
     StreamOrDevice s = {});
 
 /** Split an array into sub-arrays along a given axis. */
@@ -188,6 +201,13 @@ std::vector<array> split(
     StreamOrDevice s = {});
 std::vector<array>
 split(const array& a, const std::vector<int>& indices, StreamOrDevice s = {});
+
+/** A vector of coordinate arrays from coordinate vectors. */
+std::vector<array> meshgrid(
+    const std::vector<array>& arrays,
+    bool sparse = false,
+    std::string indexing = "xy",
+    StreamOrDevice s = {});
 
 /**
  * Clip (limit) the values in an array.
@@ -241,6 +261,7 @@ array pad(
     const std::vector<int>& low_pad_size,
     const std::vector<int>& high_pad_size,
     const array& pad_value = array(0),
+    const std::string mode = "constant",
     StreamOrDevice s = {});
 
 /** Pad an array with a constant value along all axes */
@@ -248,16 +269,19 @@ array pad(
     const array& a,
     const std::vector<std::pair<int, int>>& pad_width,
     const array& pad_value = array(0),
+    const std::string mode = "constant",
     StreamOrDevice s = {});
 array pad(
     const array& a,
     const std::pair<int, int>& pad_width,
     const array& pad_value = array(0),
+    const std::string mode = "constant",
     StreamOrDevice s = {});
 array pad(
     const array& a,
     int pad_width,
     const array& pad_value = array(0),
+    const std::string mode = "constant",
     StreamOrDevice s = {});
 
 /** Permutes the dimensions in reverse order. */
@@ -273,8 +297,6 @@ array broadcast_to(
 std::vector<array> broadcast_arrays(
     const std::vector<array>& inputs,
     StreamOrDevice s = {});
-
-/** Comparison operations */
 
 /** Returns the bool array with (a == b) element-wise. */
 array equal(const array& a, const array& b, StreamOrDevice s = {});
@@ -375,6 +397,8 @@ array isnan(const array& a, StreamOrDevice s = {});
 
 array isinf(const array& a, StreamOrDevice s = {});
 
+array isfinite(const array& a, StreamOrDevice s = {});
+
 array isposinf(const array& a, StreamOrDevice s = {});
 
 array isneginf(const array& a, StreamOrDevice s = {});
@@ -386,7 +410,13 @@ array where(
     const array& y,
     StreamOrDevice s = {});
 
-/** Reduction operations */
+/** Replace NaN and infinities with finite numbers. */
+array nan_to_num(
+    const array& a,
+    float nan = 0.0f,
+    const std::optional<float> posinf = std::nullopt,
+    const std::optional<float> neginf = std::nullopt,
+    StreamOrDevice s = {});
 
 /** True if all elements in the array are true (or non-zero). **/
 array all(const array& a, bool keepdims, StreamOrDevice s = {});
@@ -499,13 +529,14 @@ array mean(
     bool keepdims = false,
     StreamOrDevice s = {});
 
-/** Computes the mean of the elements of an array. */
+/** Computes the variance of the elements of an array. */
 array var(const array& a, bool keepdims, int ddof = 0, StreamOrDevice s = {});
 inline array var(const array& a, StreamOrDevice s = {}) {
   return var(a, false, 0, to_stream(s));
 }
 
-/** Computes the var of the elements of an array along the given axes */
+/** Computes the variance of the elements of an array along the given
+ * axes */
 array var(
     const array& a,
     const std::vector<int>& axes,
@@ -513,8 +544,33 @@ array var(
     int ddof = 0,
     StreamOrDevice s = {});
 
-/** Computes the var of the elements of an array along the given axis */
+/** Computes the variance of the elements of an array along the given
+ * axis */
 array var(
+    const array& a,
+    int axis,
+    bool keepdims = false,
+    int ddof = 0,
+    StreamOrDevice s = {});
+
+/** Computes the standard deviation of the elements of an array. */
+array std(const array& a, bool keepdims, int ddof = 0, StreamOrDevice s = {});
+inline array std(const array& a, StreamOrDevice s = {}) {
+  return std(a, false, 0, to_stream(s));
+}
+
+/** Computes the standard deviatoin of the elements of an array along the given
+ * axes */
+array std(
+    const array& a,
+    const std::vector<int>& axes,
+    bool keepdims = false,
+    int ddof = 0,
+    StreamOrDevice s = {});
+
+/** Computes the standard deviation of the elements of an array along the given
+ * axis */
+array std(
     const array& a,
     int axis,
     bool keepdims = false,
@@ -669,8 +725,6 @@ array logsumexp(
     bool keepdims = false,
     StreamOrDevice s = {});
 
-/** Simple arithmetic operations */
-
 /** Absolute value of elements in an array. */
 array abs(const array& a, StreamOrDevice s = {});
 
@@ -792,6 +846,9 @@ array arccos(const array& a, StreamOrDevice s = {});
 /** Arc Tangent of the elements of an array */
 array arctan(const array& a, StreamOrDevice s = {});
 
+/** Inverse tangent of the ratio of two arrays */
+array arctan2(const array& a, const array& b, StreamOrDevice s = {});
+
 /** Hyperbolic Sine of the elements of an array */
 array sinh(const array& a, StreamOrDevice s = {});
 
@@ -809,6 +866,12 @@ array arccosh(const array& a, StreamOrDevice s = {});
 
 /** Inverse Hyperbolic Tangent of the elements of an array */
 array arctanh(const array& a, StreamOrDevice s = {});
+
+/** Convert the elements of an array from Radians to Degrees **/
+array degrees(const array& a, StreamOrDevice s = {});
+
+/** Convert the elements of an array from Degrees to Radians **/
+array radians(const array& a, StreamOrDevice s = {});
 
 /** Natural logarithm of the elements of an array. */
 array log(const array& a, StreamOrDevice s = {});
@@ -833,6 +896,9 @@ array erf(const array& a, StreamOrDevice s = {});
 
 /** Computes the inverse error function of the elements of an array. */
 array erfinv(const array& a, StreamOrDevice s = {});
+
+/** Computes the expm1 function of the elements of an array. */
+array expm1(const array& a, StreamOrDevice s = {});
 
 /** Stop the flow of gradients. */
 array stop_gradient(const array& a, StreamOrDevice s = {});
@@ -868,9 +934,11 @@ array take(
     const array& indices,
     int axis,
     StreamOrDevice s = {});
+array take(const array& a, int index, int axis, StreamOrDevice s = {});
 
 /** Take array entries at the given indices treating the array as flattened. */
 array take(const array& a, const array& indices, StreamOrDevice s = {});
+array take(const array& a, int index, StreamOrDevice s = {});
 
 /** Take array entries given indices along the axis */
 array take_along_axis(
@@ -879,7 +947,112 @@ array take_along_axis(
     int axis,
     StreamOrDevice s = {});
 
-/** Scatter updates to given linear indices */
+/** Put the values into the array at the given indices along the axis */
+array put_along_axis(
+    const array& a,
+    const array& indices,
+    const array& values,
+    int axis,
+    StreamOrDevice s = {});
+
+/** Scatter updates to the given indices.
+ *
+ * The parameters ``indices`` and ``axes`` determine the locations of ``a``
+ * that are updated with the values in ``updates``. Assuming 1-d ``indices``
+ * for simplicity, ``indices[i]`` are the indices on axis ``axes[i]`` to which
+ * the values in ``updates`` will be applied. Note each array in
+ * ``indices`` is assigned to a corresponding axis and hence ``indices.size() ==
+ * axes.size()``. If an index/axis pair is not provided then indices along that
+ * axis are assumed to be zero.
+ *
+ * Note the rank of ``updates`` must be equal to the sum of the rank of the
+ * broadcasted ``indices`` and the rank of ``a``. In other words, assuming the
+ * arrays in ``indices`` have the same shape, ``updates.ndim() ==
+ * indices[0].ndim() + a.ndim()``. The leading dimensions of ``updates``
+ * correspond to the indices, and the remaining ``a.ndim()`` dimensions are the
+ * values that will be applied to the given location in ``a``.
+ *
+ * For example:
+ *
+ * @code
+ * auto in = zeros({4, 4}, float32);
+ * auto indices = array({2});
+ * auto updates = reshape(arange(1, 3, float32), {1, 1, 2});
+ * std::vector<int> axes{0};
+ *
+ * auto out = scatter(in, {indices}, updates, axes);
+ * @endcode
+ *
+ * will produce:
+ *
+ * @code
+ * array([[0, 0, 0, 0],
+ *        [0, 0, 0, 0],
+ *        [1, 2, 0, 0],
+ *        [0, 0, 0, 0]], dtype=float32)
+ * @endcode
+ *
+ * This scatters the two-element row vector ``[1, 2]`` starting at the ``(2,
+ * 0)`` position of ``a``.
+ *
+ * Adding another element to ``indices`` will scatter into another location of
+ * ``a``. We also have to add an another update for the new index:
+ *
+ * @code
+ * auto in = zeros({4, 4}, float32);
+ * auto indices = array({2, 0});
+ * auto updates = reshape(arange(1, 5, float32), {2, 1, 2});
+ * std::vector<int> axes{0};
+ *
+ * auto out = scatter(in, {indices}, updates, axes):
+ * @endcode
+ *
+ * will produce:
+ *
+ * @code
+ * array([[3, 4, 0, 0],
+ *        [0, 0, 0, 0],
+ *        [1, 2, 0, 0],
+ *        [0, 0, 0, 0]], dtype=float32)
+ * @endcode
+ *
+ * To control the scatter location on an additional axis, add another index
+ * array to ``indices`` and another axis to ``axes``:
+ *
+ * @code
+ * auto in = zeros({4, 4}, float32);
+ * auto indices = std::vector{array({2, 0}), array({1, 2})};
+ * auto updates = reshape(arange(1, 5, float32), {2, 1, 2});
+ * std::vector<int> axes{0, 1};
+ *
+ * auto out = scatter(in, indices, updates, axes);
+ * @endcode
+ *
+ * will produce:
+ *
+ * @code
+ * array([[0, 0, 3, 4],
+ *       [0, 0, 0, 0],
+ *       [0, 1, 2, 0],
+ *       [0, 0, 0, 0]], dtype=float32)
+ * @endcode
+ *
+ * Items in indices are broadcasted together. This means:
+ *
+ * @code
+ * auto indices = std::vector{array({2, 0}), array({1})};
+ * @endcode
+ *
+ * is equivalent to:
+ *
+ * @code
+ * auto indices = std::vector{array({2, 0}), array({1, 1})};
+ * @endcode
+ *
+ * Note, ``scatter`` does not perform bounds checking on the indices and
+ * updates.  Out-of-bounds accesses on ``a`` are undefined and typically result
+ * in unintended or invalid memory writes.
+ */
 array scatter(
     const array& a,
     const std::vector<array>& indices,
@@ -968,29 +1141,20 @@ array rsqrt(const array& a, StreamOrDevice s = {});
 array softmax(
     const array& a,
     const std::vector<int>& axes,
+    bool precise = false,
     StreamOrDevice s = {});
 
 /** Softmax of an array. */
-array softmax(const array& a, StreamOrDevice s = {});
+array softmax(const array& a, bool precise = false, StreamOrDevice s = {});
 
 /** Softmax of an array. */
-inline array softmax(const array& a, int axis, StreamOrDevice s = {}) {
-  return softmax(a, std::vector<int>{axis}, s);
+inline array
+softmax(const array& a, int axis, bool precise = false, StreamOrDevice s = {}) {
+  return softmax(a, std::vector<int>{axis}, precise, s);
 }
 
 /** Raise elements of a to the power of b element-wise */
 array power(const array& a, const array& b, StreamOrDevice s = {});
-inline array operator^(const array& a, const array& b) {
-  return power(a, b);
-}
-template <typename T>
-array operator^(T a, const array& b) {
-  return power(array(a), b);
-}
-template <typename T>
-array operator^(const array& a, T b) {
-  return power(a, array(b));
-}
 
 /** Cumulative sum of an array. */
 array cumsum(
@@ -1023,8 +1187,6 @@ array cummin(
     bool reverse = false,
     bool inclusive = true,
     StreamOrDevice s = {});
-
-/** Convolution operations */
 
 /** General convolution with a filter */
 array conv_general(
@@ -1083,6 +1245,46 @@ array conv2d(
     int groups = 1,
     StreamOrDevice s = {});
 
+/** 3D convolution with a filter */
+array conv3d(
+    const array& input,
+    const array& weight,
+    const std::tuple<int, int, int>& stride = {1, 1, 1},
+    const std::tuple<int, int, int>& padding = {0, 0, 0},
+    const std::tuple<int, int, int>& dilation = {1, 1, 1},
+    int groups = 1,
+    StreamOrDevice s = {});
+
+/** 1D transposed convolution with a filter */
+array conv_transpose1d(
+    const array& input,
+    const array& weight,
+    int stride = 1,
+    int padding = 0,
+    int dilation = 1,
+    int groups = 1,
+    StreamOrDevice s = {});
+
+/** 2D transposed convolution with a filter */
+array conv_transpose2d(
+    const array& input,
+    const array& weight,
+    const std::pair<int, int>& stride = {1, 1},
+    const std::pair<int, int>& padding = {0, 0},
+    const std::pair<int, int>& dilation = {1, 1},
+    int groups = 1,
+    StreamOrDevice s = {});
+
+/** 3D transposed convolution with a filter */
+array conv_transpose3d(
+    const array& input,
+    const array& weight,
+    const std::tuple<int, int, int>& stride = {1, 1, 1},
+    const std::tuple<int, int, int>& padding = {0, 0, 0},
+    const std::tuple<int, int, int>& dilation = {1, 1, 1},
+    int groups = 1,
+    StreamOrDevice s = {});
+
 /** Quantized matmul multiplies x with a quantized matrix w*/
 array quantized_matmul(
     const array& x,
@@ -1110,17 +1312,31 @@ array dequantize(
     int bits = 4,
     StreamOrDevice s = {});
 
-/** TensorDot returns a contraction of a and b over multiple dimensions. */
+/** Compute matrix products with matrix-level gather. */
+array gather_qmm(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    std::optional<array> lhs_indices = std::nullopt,
+    std::optional<array> rhs_indices = std::nullopt,
+    bool transpose = true,
+    int group_size = 64,
+    int bits = 4,
+    StreamOrDevice s = {});
+
+/** Returns a contraction of a and b over multiple dimensions. */
 array tensordot(
     const array& a,
     const array& b,
-    const int dims = 2,
+    const int axis = 2,
     StreamOrDevice s = {});
 
 array tensordot(
     const array& a,
     const array& b,
-    const std::pair<std::vector<int>, std::vector<int>>& dims,
+    const std::vector<int>& axes_a,
+    const std::vector<int>& axes_b,
     StreamOrDevice s = {});
 
 /** Compute the outer product of two vectors. */
@@ -1138,6 +1354,24 @@ array addmm(
     const float& beta = 1.f,
     StreamOrDevice s = {});
 
+/** Compute matrix product with block masking */
+array block_masked_mm(
+    array a,
+    array b,
+    int block_size,
+    std::optional<array> mask_out = std::nullopt,
+    std::optional<array> mask_lhs = std::nullopt,
+    std::optional<array> mask_rhs = std::nullopt,
+    StreamOrDevice s = {});
+
+/** Compute matrix product with matrix-level gather */
+array gather_mm(
+    array a,
+    array b,
+    std::optional<array> lhs_indices = std::nullopt,
+    std::optional<array> rhs_indices = std::nullopt,
+    StreamOrDevice s = {});
+
 /** Extract a diagonal or construct a diagonal array */
 array diagonal(
     const array& a,
@@ -1148,6 +1382,22 @@ array diagonal(
 
 /** Extract diagonal from a 2d array or create a diagonal matrix. */
 array diag(const array& a, int k = 0, StreamOrDevice s = {});
+
+/** Return the sum along a specified diagonal in the given array. */
+array trace(
+    const array& a,
+    int offset,
+    int axis1,
+    int axis2,
+    Dtype dtype,
+    StreamOrDevice s = {});
+array trace(
+    const array& a,
+    int offset,
+    int axis1,
+    int axis2,
+    StreamOrDevice s = {});
+array trace(const array& a, StreamOrDevice s = {});
 
 /**
  * Implements the identity function but allows injecting dependencies to other
@@ -1171,5 +1421,65 @@ array atleast_3d(const array& a, StreamOrDevice s = {});
 std::vector<array> atleast_3d(
     const std::vector<array>& a,
     StreamOrDevice s = {});
+
+/**
+ * Extract the number of elements along some axes as a scalar array. Used to
+ * allow shape dependent shapeless compilation (pun intended).
+ */
+array number_of_elements(
+    const array& a,
+    std::vector<int> axes,
+    bool inverted,
+    Dtype dtype = int32,
+    StreamOrDevice s = {});
+
+array conjugate(const array& a, StreamOrDevice s = {});
+
+/** Bitwise and. */
+array bitwise_and(const array& a, const array& b, StreamOrDevice s = {});
+array operator&(const array& a, const array& b);
+
+/** Bitwise inclusive or. */
+array bitwise_or(const array& a, const array& b, StreamOrDevice s = {});
+array operator|(const array& a, const array& b);
+
+/** Bitwise exclusive or. */
+array bitwise_xor(const array& a, const array& b, StreamOrDevice s = {});
+array operator^(const array& a, const array& b);
+
+/** Shift bits to the left. */
+array left_shift(const array& a, const array& b, StreamOrDevice s = {});
+array operator<<(const array& a, const array& b);
+
+/** Shift bits to the right. */
+array right_shift(const array& a, const array& b, StreamOrDevice s = {});
+array operator>>(const array& a, const array& b);
+
+array view(const array& a, const Dtype& dtype, StreamOrDevice s = {});
+
+/** Roll elements along an axis and introduce them on the other side */
+array roll(const array& a, int shift, StreamOrDevice s = {});
+array roll(
+    const array& a,
+    const std::vector<int>& shift,
+    StreamOrDevice s = {});
+array roll(const array& a, int shift, int axis, StreamOrDevice s = {});
+array roll(
+    const array& a,
+    int shift,
+    const std::vector<int>& axes,
+    StreamOrDevice s = {});
+array roll(
+    const array& a,
+    const std::vector<int>& shift,
+    int axis,
+    StreamOrDevice s = {});
+array roll(
+    const array& a,
+    const std::vector<int>& shift,
+    const std::vector<int>& axes,
+    StreamOrDevice s = {});
+
+/** @} */
 
 } // namespace mlx::core

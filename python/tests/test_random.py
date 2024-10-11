@@ -1,5 +1,6 @@
 # Copyright © 2023 Apple Inc.
 
+import math
 import unittest
 
 import mlx.core as mx
@@ -63,38 +64,140 @@ class TestRandom(mlx_tests.MLXTestCase):
 
         self.assertEqual(mx.random.uniform().dtype, mx.random.uniform(dtype=None).dtype)
 
-    def test_normal(self):
+    def test_normal_and_laplace(self):
+        # Same tests for normal and laplace.
+        for distribution_sampler in [mx.random.normal, mx.random.laplace]:
+            key = mx.random.key(0)
+            a = distribution_sampler(key=key)
+            self.assertEqual(a.shape, ())
+            self.assertEqual(a.dtype, mx.float32)
+
+            b = distribution_sampler(key=key)
+            self.assertEqual(a.item(), b.item())
+
+            a = distribution_sampler(shape=(2, 3))
+            self.assertEqual(a.shape, (2, 3))
+
+            ## Generate in float16 or bfloat16
+            for t in [mx.float16, mx.bfloat16]:
+                a = distribution_sampler(dtype=t)
+                self.assertEqual(a.dtype, t)
+
+            # Generate with a given mean and standard deviation
+            loc = 1.0
+            scale = 2.0
+
+            a = distribution_sampler(shape=(3, 2), loc=loc, scale=scale, key=key)
+            b = scale * distribution_sampler(shape=(3, 2), key=key) + loc
+            self.assertTrue(mx.allclose(a, b))
+
+            a = distribution_sampler(
+                shape=(3, 2), loc=loc, scale=scale, dtype=mx.float16, key=key
+            )
+            b = (
+                scale * distribution_sampler(shape=(3, 2), dtype=mx.float16, key=key)
+                + loc
+            )
+            self.assertTrue(mx.allclose(a, b))
+
+            self.assertEqual(
+                distribution_sampler().dtype, distribution_sampler(dtype=None).dtype
+            )
+
+            # Test not getting -inf or inf with half precison
+            for hp in [mx.float16, mx.bfloat16]:
+                a = abs(distribution_sampler(shape=(10000,), loc=0, scale=1, dtype=hp))
+                self.assertTrue(mx.all(a < mx.inf))
+
+    def test_multivariate_normal(self):
         key = mx.random.key(0)
-        a = mx.random.normal(key=key)
-        self.assertEqual(a.shape, ())
-        self.assertEqual(a.dtype, mx.float32)
+        mean = mx.array([0, 0])
+        cov = mx.array([[1, 0], [0, 1]])
 
-        b = mx.random.normal(key=key)
-        self.assertEqual(a.item(), b.item())
+        a = mx.random.multivariate_normal(mean, cov, key=key, stream=mx.cpu)
+        self.assertEqual(a.shape, (2,))
 
-        a = mx.random.normal(shape=(2, 3))
-        self.assertEqual(a.shape, (2, 3))
-
-        ## Generate in float16 or bfloat16
-        for t in [mx.float16, mx.bfloat16]:
-            a = mx.random.normal(dtype=t)
+        ## Check dtypes
+        for t in [mx.float32]:
+            a = mx.random.multivariate_normal(
+                mean, cov, dtype=t, key=key, stream=mx.cpu
+            )
             self.assertEqual(a.dtype, t)
+        for t in [
+            mx.int8,
+            mx.int32,
+            mx.int64,
+            mx.uint8,
+            mx.uint32,
+            mx.uint64,
+            mx.float16,
+            mx.bfloat16,
+        ]:
+            with self.assertRaises(ValueError):
+                mx.random.multivariate_normal(
+                    mean, cov, dtype=t, key=key, stream=mx.cpu
+                )
 
-        # Generate with a given mean and standard deviation
-        loc = 1.0
-        scale = 2.0
+        ## Check incompatible shapes
+        with self.assertRaises(ValueError):
+            mean = mx.zeros((2, 2))
+            cov = mx.zeros((2, 2))
+            mx.random.multivariate_normal(mean, cov, shape=(3,), key=key, stream=mx.cpu)
 
-        a = mx.random.normal(shape=(3, 2), loc=loc, scale=scale, key=key)
-        b = scale * mx.random.normal(shape=(3, 2), key=key) + loc
-        self.assertTrue(mx.allclose(a, b))
+        with self.assertRaises(ValueError):
+            mean = mx.zeros((2))
+            cov = mx.zeros((2, 2, 2))
+            mx.random.multivariate_normal(mean, cov, shape=(3,), key=key, stream=mx.cpu)
 
-        a = mx.random.normal(
-            shape=(3, 2), loc=loc, scale=scale, dtype=mx.float16, key=key
+        with self.assertRaises(ValueError):
+            mean = mx.zeros((3,))
+            cov = mx.zeros((2, 2))
+            mx.random.multivariate_normal(mean, cov, key=key, stream=mx.cpu)
+
+        with self.assertRaises(ValueError):
+            mean = mx.zeros((2,))
+            cov = mx.zeros((2, 3))
+            mx.random.multivariate_normal(mean, cov, key=key, stream=mx.cpu)
+
+        ## Different shape of mean and cov
+        mean = mx.array([[0, 7], [1, 2], [3, 4]])
+        cov = mx.array([[1, 0.5], [0.5, 1]])
+        a = mx.random.multivariate_normal(mean, cov, shape=(4, 3), stream=mx.cpu)
+        self.assertEqual(a.shape, (4, 3, 2))
+
+        ## Check correcteness of the mean and covariance
+        n_test = int(1e5)
+
+        def check_jointly_gaussian(data, mean, cov):
+            empirical_mean = mx.mean(data, axis=0)
+            empirical_cov = (
+                (data - empirical_mean).T @ (data - empirical_mean) / data.shape[0]
+            )
+            N = data.shape[1]
+            self.assertTrue(
+                mx.allclose(
+                    empirical_mean, mean, rtol=0.0, atol=10 * N**2 / math.sqrt(n_test)
+                )
+            )
+            self.assertTrue(
+                mx.allclose(
+                    empirical_cov, cov, rtol=0.0, atol=10 * N**2 / math.sqrt(n_test)
+                )
+            )
+
+        mean = mx.array([4.0, 7.0])
+        cov = mx.array([[2, 0.5], [0.5, 1]])
+        data = mx.random.multivariate_normal(
+            mean, cov, shape=(n_test,), key=key, stream=mx.cpu
         )
-        b = scale * mx.random.normal(shape=(3, 2), dtype=mx.float16, key=key) + loc
-        self.assertTrue(mx.allclose(a, b))
+        check_jointly_gaussian(data, mean, cov)
 
-        self.assertEqual(mx.random.normal().dtype, mx.random.normal(dtype=None).dtype)
+        mean = mx.arange(3)
+        cov = mx.array([[1, -1, 0.5], [-1, 1, -0.5], [0.5, -0.5, 1]])
+        data = mx.random.multivariate_normal(
+            mean, cov, shape=(n_test,), key=key, stream=mx.cpu
+        )
+        check_jointly_gaussian(data, mean, cov)
 
     def test_randint(self):
         a = mx.random.randint(0, 1, [])
@@ -221,6 +324,29 @@ class TestRandom(mlx_tests.MLXTestCase):
 
         with self.assertRaises(ValueError):
             mx.random.categorical(logits, shape=[10, 5], num_samples=5)
+
+    def test_permutation(self):
+        x = sorted(mx.random.permutation(4).tolist())
+        self.assertEqual([0, 1, 2, 3], x)
+
+        x = mx.array([0, 1, 2, 3])
+        x = sorted(mx.random.permutation(x).tolist())
+        self.assertEqual([0, 1, 2, 3], x)
+
+        x = mx.array([0, 1, 2, 3])
+        x = sorted(mx.random.permutation(x).tolist())
+
+        # 2-D
+        x = mx.arange(16).reshape(4, 4)
+        out = mx.sort(mx.random.permutation(x, axis=0), axis=0)
+        self.assertTrue(mx.array_equal(x, out))
+        out = mx.sort(mx.random.permutation(x, axis=1), axis=1)
+        self.assertTrue(mx.array_equal(x, out))
+
+        # Basically 0 probability this should fail.
+        sorted_x = mx.arange(16384)
+        x = mx.random.permutation(16384)
+        self.assertFalse(mx.array_equal(sorted_x, x))
 
 
 if __name__ == "__main__":

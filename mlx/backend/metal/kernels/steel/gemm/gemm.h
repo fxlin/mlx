@@ -140,7 +140,7 @@ struct GEMMKernel {
   static METAL_FUNC void run(
       const device T* A [[buffer(0)]],
       const device T* B [[buffer(1)]],
-      device U* C [[buffer(2)]],
+      device U* D [[buffer(2)]],
       const constant GEMMParams* params [[buffer(3)]],
       threadgroup T* As [[threadgroup(0)]],
       threadgroup T* Bs [[threadgroup(1)]],
@@ -164,10 +164,12 @@ struct GEMMKernel {
     // Find block in A, B, C
     const int c_row = tid_y * BM;
     const int c_col = tid_x * BN;
+    const size_t c_row_long = size_t(c_row);
+    const size_t c_col_long = size_t(c_col);
 
-    A += transpose_a ? c_row : c_row * params->lda;
-    B += transpose_b ? c_col * params->ldb : c_col;
-    C += c_row * params->ldc + c_col;
+    A += transpose_a ? c_row_long : c_row_long * params->lda;
+    B += transpose_b ? c_col_long * params->ldb : c_col_long;
+    D += c_row_long * params->ldd + c_col_long;
 
     // Prepare threadgroup loading operations
     thread loader_a_t loader_a(A, params->lda, As, simd_group_id, simd_lane_id);
@@ -214,7 +216,7 @@ struct GEMMKernel {
       }
 
       // Store results to device memory
-      mma_op.store_result(C, params->ldc);
+      mma_op.store_result(D, params->ldd);
       return;
 
     }
@@ -237,7 +239,7 @@ struct GEMMKernel {
             tgp_bn,
             leftover_bk);
 
-        mma_op.store_result(C, params->ldc);
+        mma_op.store_result(D, params->ldd);
         return;
 
       } else if (tgp_bn == BN) {
@@ -252,7 +254,7 @@ struct GEMMKernel {
             tgp_bn,
             leftover_bk);
 
-        mma_op.store_result_safe(C, params->ldc, short2(tgp_bn, tgp_bm));
+        mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
         return;
 
       } else if (tgp_bm == BM) {
@@ -267,7 +269,7 @@ struct GEMMKernel {
             tgp_bn,
             leftover_bk);
 
-        mma_op.store_result_safe(C, params->ldc, short2(tgp_bn, tgp_bm));
+        mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
         return;
 
       } else {
@@ -282,7 +284,7 @@ struct GEMMKernel {
             tgp_bn,
             leftover_bk);
 
-        mma_op.store_result_safe(C, params->ldc, short2(tgp_bn, tgp_bm));
+        mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
         return;
       }
     }

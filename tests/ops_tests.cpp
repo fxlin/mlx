@@ -1,4 +1,4 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 #include <cmath>
 #include <numeric>
 
@@ -56,6 +56,80 @@ TEST_CASE("test reshape") {
   CHECK_THROWS_AS(reshape(x, {1}), std::invalid_argument);
   y = reshape(x, {1, 5, 0});
   CHECK_EQ(y.shape(), std::vector<int>{1, 5, 0});
+
+  // Check that reshaping a transposed array doesn't result in a copy
+  x = reshape(arange(64), {2, 4, 8});
+  x.eval();
+  CHECK_EQ(x.strides()[0], 32);
+  CHECK_EQ(x.strides()[1], 8);
+  CHECK_EQ(x.strides()[2], 1);
+  y = reshape(transpose(x, {0, 2, 1}), {2, 4, 2, 4});
+  y.eval();
+  CHECK_EQ(y.strides()[0], 32);
+  CHECK_EQ(y.strides()[1], 2);
+  CHECK_EQ(y.strides()[2], 1);
+  CHECK_EQ(y.strides()[3], 8);
+  CHECK_EQ(x.data<int32_t>(), y.data<int32_t>());
+
+  // Split transposed (2, 8, 4) -> (2, 8, 2, 2)
+  y = reshape(transpose(x, {0, 2, 1}), {2, 8, 2, 2});
+  y.eval();
+  CHECK_EQ(y.strides()[0], 32);
+  CHECK_EQ(y.strides()[1], 1);
+  CHECK_EQ(y.strides()[2], 16);
+  CHECK_EQ(y.strides()[3], 8);
+  CHECK_EQ(x.data<int32_t>(), y.data<int32_t>());
+
+  // Split transposed (2, 8, 4) -> (2, 8, 2, 1, 2)
+  y = reshape(transpose(x, {0, 2, 1}), {2, 8, 2, 1, 2});
+  y.eval();
+  CHECK_EQ(y.strides()[0], 32);
+  CHECK_EQ(y.strides()[1], 1);
+  CHECK_EQ(y.strides()[2], 16);
+  // y.strides()[3] can be anything since y.shape()[3] == 1
+  CHECK_EQ(y.strides()[4], 8);
+  CHECK_EQ(x.data<int32_t>(), y.data<int32_t>());
+
+  // Split transposed (2, 8, 4) -> (2, 8, 2, 1, 2, 1)
+  y = reshape(transpose(x, {0, 2, 1}), {2, 8, 2, 1, 2, 1});
+  y.eval();
+  CHECK_EQ(y.strides()[0], 32);
+  CHECK_EQ(y.strides()[1], 1);
+  CHECK_EQ(y.strides()[2], 16);
+  // y.strides()[3] can be anything since y.shape()[3] == 1
+  CHECK_EQ(y.strides()[4], 8);
+  // y.strides()[5] can be anything since y.shape()[5] == 1
+  CHECK_EQ(x.data<int32_t>(), y.data<int32_t>());
+
+  // Check contiguity preservation
+  x = ones({10, 10});
+  eval(x);
+  CHECK(x.flags().row_contiguous);
+  CHECK(!x.flags().col_contiguous);
+  y = reshape(x, {2, 5, 10});
+  eval(y);
+  CHECK(y.flags().row_contiguous);
+  CHECK(!y.flags().col_contiguous);
+  y = reshape(x, {10, 1, 10, 1});
+  eval(y);
+  CHECK(y.flags().row_contiguous);
+  CHECK(!y.flags().col_contiguous);
+  x = transpose(x, {1, 0});
+  eval(x);
+  CHECK(!x.flags().row_contiguous);
+  CHECK(x.flags().col_contiguous);
+  y = reshape(x, {2, 5, 10});
+  eval(y);
+  CHECK(!y.flags().row_contiguous);
+  CHECK(y.flags().col_contiguous);
+  y = reshape(x, {2, 50});
+  eval(y);
+  CHECK(y.flags().row_contiguous);
+  CHECK(!y.flags().col_contiguous);
+  y = reshape(x, {10, 1, 10, 1});
+  eval(y);
+  CHECK(!y.flags().row_contiguous);
+  CHECK(y.flags().col_contiguous);
 }
 
 TEST_CASE("test flatten") {
@@ -152,6 +226,110 @@ TEST_CASE("test slice") {
 
   out = slice(x, {0, 0}, {2, 4}, {1, 2});
   CHECK(array_equal(out, array({0, 2, 4, 6}, {2, 2})).item<bool>());
+
+  // Check contiguity preservation
+  x = ones({10, 10});
+  eval(x);
+  CHECK(x.flags().row_contiguous);
+  CHECK(!x.flags().col_contiguous);
+  out = slice(x, {0, 0}, {10, 5});
+  eval(out);
+  CHECK(!out.flags().row_contiguous);
+  CHECK(!out.flags().col_contiguous);
+  out = slice(x, {0, 0}, {5, 10});
+  eval(out);
+  CHECK(out.flags().row_contiguous);
+  CHECK(!out.flags().col_contiguous);
+  x = transpose(x, {1, 0});
+  eval(x);
+  CHECK(!x.flags().row_contiguous);
+  CHECK(x.flags().col_contiguous);
+  out = slice(x, {0, 0}, {10, 5});
+  eval(out);
+  CHECK(!out.flags().row_contiguous);
+  CHECK(out.flags().col_contiguous);
+  out = slice(x, {0, 0}, {5, 10});
+  eval(out);
+  CHECK(!out.flags().row_contiguous);
+  CHECK(!out.flags().col_contiguous);
+
+  x = ones({6, 4, 10});
+  out = slice(x, {0, 0, 0}, {6, 4, 10}, {2, 1, 2});
+  eval(out);
+  CHECK(!out.flags().contiguous);
+  CHECK(!out.flags().row_contiguous);
+  CHECK(!out.flags().col_contiguous);
+
+  // Check data size correctness
+  x = ones({4});
+  out = slice(x, {0}, {2});
+  eval(out);
+  CHECK_EQ(out.data_size(), 2);
+
+  out = slice(x, {2}, {4});
+  eval(out);
+  CHECK_EQ(out.data_size(), 2);
+
+  out = slice(x, {0}, {4}, {2});
+  eval(out);
+  CHECK_EQ(out.data_size(), 4);
+
+  x = ones({4, 4});
+  out = slice(x, {0, 0}, {2, 4});
+  eval(out);
+  CHECK_EQ(out.data_size(), 8);
+
+  out = slice(x, {0, 0}, {1, 2});
+  eval(out);
+  CHECK_EQ(out.data_size(), 2);
+
+  out = slice(x, {0, 1}, {4, 4});
+  eval(out);
+  CHECK_EQ(out.data_size(), 15);
+
+  out = slice(x, {1, 2}, {3, 4});
+  eval(out);
+  CHECK_EQ(out.data_size(), 6);
+
+  x = ones({4, 4, 4});
+  out = slice(x, {0, 0, 0}, {4, 2, 2});
+  eval(out);
+  CHECK_EQ(out.data_size(), 54);
+
+  x = ones({4, 4, 4});
+  out = slice(x, {2, 2, 2}, {3, 3, 3});
+  eval(out);
+  CHECK_EQ(out.data_size(), 1);
+
+  x = ones({4, 4, 4});
+  out = slice(x, {2, 2, 2}, {3, 4, 3});
+  eval(out);
+  CHECK_EQ(out.data_size(), 5);
+}
+
+TEST_CASE("test slice update") {
+  array x = array({0., 0., 0., 0., 0., 0., 0., 0.}, {8}, float32);
+  array y = array(
+      {
+          1.,
+          2.,
+          3.,
+          4.,
+      },
+      {4},
+      float32);
+
+  auto out = slice_update(x, y, {2}, {6}, {1});
+  CHECK(array_equal(slice(out, {2}, {6}, {1}), y).item<bool>());
+
+  out = slice_update(x, y, {5}, {1}, {-1});
+  CHECK(array_equal(slice(out, {5}, {1}, {-1}), y).item<bool>());
+
+  x = reshape(x, {2, 4});
+  out = slice_update(x, y, {0, 0}, {2, 4}, {1, 1});
+  out = reshape(out, {8});
+  CHECK(array_equal(slice(out, {0}, {4}, {1}), y).item<bool>());
+  CHECK(array_equal(slice(out, {4}, {8}, {1}), y).item<bool>());
 }
 
 TEST_CASE("test split") {
@@ -822,12 +1000,50 @@ TEST_CASE("test reduction ops") {
 
   // Test softmax
   {
-    auto x = array({0., 0., 0., 0.});
-    auto y = array({0.25, 0.25, 0.25, 0.25});
-    CHECK(array_equal(y, softmax(x)).item<bool>());
-    CHECK(array_equal(y, softmax(x, -1)).item<bool>());
-    CHECK(array_equal(y, softmax(x, std::vector<int>{-1})).item<bool>());
-    CHECK(array_equal(y, softmax(x, std::vector<int>{0})).item<bool>());
+    for (auto t : {float16, bfloat16, float32}) {
+      const auto rtol = t == float32 ? 1e-5 : 1e-2;
+      auto x = array({}, t);
+      CHECK(array_equal(x, softmax(x)).item<bool>());
+
+      // all zeros
+      x = array({0., 0., 0., 0.}, t);
+      auto y = array({0.25, 0.25, 0.25, 0.25}, t);
+      CHECK(array_equal(y, softmax(x)).item<bool>());
+      CHECK(array_equal(y, softmax(x, -1)).item<bool>());
+      CHECK(array_equal(y, softmax(x, std::vector<int>{-1})).item<bool>());
+      CHECK(array_equal(y, softmax(x, std::vector<int>{0})).item<bool>());
+
+      auto ones = array(1.0f, t);
+      CHECK(array_equal(ones, sum(softmax(x))).item<bool>());
+
+      // all ones
+      x = array({1., 1., 1., 1.}, t);
+      CHECK(array_equal(y, softmax(x)).item<bool>());
+      CHECK(array_equal(ones, sum(softmax(x))).item<bool>());
+
+      // negative values
+      x = array({-1., -2., -3., -4.}, t);
+      y = array({0.643914, 0.236883, 0.0871443, 0.0320586}, t);
+      CHECK(allclose(y, softmax(x), rtol).item<bool>());
+      CHECK(allclose(ones, sum(softmax(x)), rtol).item<bool>());
+
+      // positive and negative values
+      x = array({1., 0., -1., 0.}, t);
+      y = array({0.534447, 0.196612, 0.0723295, 0.196612}, t);
+      CHECK(allclose(y, softmax(x), rtol).item<bool>());
+      CHECK(allclose(ones, sum(softmax(x)), rtol).item<bool>());
+
+      // large positive values
+      x = array({1000., 1000., 1000.}, t);
+      y = array({0.333333, 0.333333, 0.333333}, t);
+      CHECK(allclose(y, softmax(x)).item<bool>());
+      CHECK(array_equal(ones, sum(softmax(x))).item<bool>());
+
+      // large negative values
+      x = negative(x);
+      CHECK(allclose(y, softmax(x)).item<bool>());
+      CHECK(array_equal(ones, sum(softmax(x))).item<bool>());
+    }
   }
 }
 
@@ -1023,6 +1239,20 @@ TEST_CASE("test arithmetic unary ops") {
     CHECK(allclose(exp(x), expected).item<bool>());
   }
 
+  // Test expm1
+  {
+    array x(-1.0f);
+    CHECK_EQ(expm1(x).item<float>(), doctest::Approx(std::expm1(-1.0f)));
+
+    x = array(1.0f);
+    CHECK_EQ(expm1(x).item<float>(), doctest::Approx(std::expm1(1.0f)));
+
+    // Integer input type
+    x = array(1);
+    CHECK_EQ(expm1(x).dtype(), float32);
+    CHECK_EQ(expm1(x).item<float>(), doctest::Approx(std::expm1(1.0f)));
+  }
+
   // Test sine
   {
     array x(0.0);
@@ -1069,6 +1299,56 @@ TEST_CASE("test arithmetic unary ops") {
     x = split(array({0.0f, 1.0f, 2.0f, 3.0f}, {2, 2}), 2, 1)[0];
     auto expected = array({std::cos(0.0f), std::cos(2.0f)}, {2, 1});
     CHECK(allclose(cos(x), expected).item<bool>());
+  }
+
+  // Test degrees
+  {
+    array x(0.0);
+    CHECK_EQ(degrees(x).item<float>(), 0.0);
+
+    x = array(M_PI_2);
+    CHECK(degrees(x).item<float>() == doctest::Approx(90.0));
+
+    CHECK(array_equal(degrees(array({})), array({})).item<bool>());
+
+    // Integer input type
+    x = array(0);
+    CHECK_EQ(x.dtype(), int32);
+    CHECK_EQ(degrees(x).item<float>(), 0.0);
+
+    // Input is irregularly strided
+    x = broadcast_to(array(M_PI_2), {2, 2, 2});
+    CHECK(allclose(degrees(x), full({2, 2, 2}, 90.0)).item<bool>());
+
+    float angles[] = {0.0f, M_PI_2, M_PI, 3.0f * M_PI_2};
+    x = split(array(angles, {2, 2}), 2, 1)[0];
+    auto expected = array({0.0f, 180.0f}, {2, 1});
+    CHECK(allclose(degrees(x), expected).item<bool>());
+  }
+
+  // Test radians
+  {
+    array x(0.0);
+    CHECK_EQ(radians(x).item<float>(), 0.0);
+
+    x = array(90.0);
+    CHECK(radians(x).item<float>() == doctest::Approx(M_PI_2));
+
+    CHECK(array_equal(radians(array({})), array({})).item<bool>());
+
+    // Integer input type
+    x = array(90);
+    CHECK_EQ(x.dtype(), int32);
+    CHECK(radians(x).item<float>() == doctest::Approx(M_PI_2));
+
+    // Input is irregularly strided
+    x = broadcast_to(array(90.0f), {2, 2, 2});
+    CHECK(allclose(radians(x), full({2, 2, 2}, M_PI_2)).item<bool>());
+
+    x = split(array({0.0f, 90.0f, 180.0f, 270.0f}, {2, 2}), 2, 1)[0];
+    float angles[] = {0.0f, M_PI};
+    auto expected = array(angles, {2, 1});
+    CHECK(allclose(radians(x), expected).item<bool>());
   }
 
   // Test log
@@ -1703,6 +1983,12 @@ TEST_CASE("test take") {
   CHECK(array_equal(out, zeros({1, 1, 1})).item<bool>());
   out = take(a, array({0, 1}), 1);
   CHECK(array_equal(out, zeros({1, 2, 1})).item<bool>());
+
+  // Indices have wrong shape
+  a = zeros({2, 3, 4});
+  CHECK_THROWS(take(a, zeros({1, 3, 4}), 1));
+  CHECK_THROWS(take(a, zeros({2, 3, 7}), 1));
+  CHECK_THROWS(take(a, zeros({2, 3, 2}), 0));
 }
 
 TEST_CASE("test take along axis") {
@@ -1720,12 +2006,6 @@ TEST_CASE("test take along axis") {
   CHECK_EQ(out.item<int>(), 1);
   out = take_along_axis(a, array({1}), -1);
   CHECK_EQ(out.item<int>(), 1);
-
-  // Indices have wrong shape
-  a = zeros({2, 3, 4});
-  CHECK_THROWS(take(a, zeros({1, 3, 4}), 1));
-  CHECK_THROWS(take(a, zeros({2, 3, 7}), 1));
-  CHECK_THROWS(take(a, zeros({2, 3, 2}), 0));
 
   // Empty arrays
   a = reshape(array({}), {1, 0});
@@ -1775,6 +2055,48 @@ TEST_CASE("test take along axis") {
   out = take_along_axis(a, inds, 2);
   CHECK(array_equal(out, array({0, 1, 2, 2, 5, 4, 6, 7}, {2, 2, 2}))
             .item<bool>());
+}
+
+TEST_CASE("test put along axis") {
+  // No zero dim arrays
+  auto a = array(1);
+  auto v = array(1);
+  CHECK_THROWS(put_along_axis(a, array(0), v, 0));
+
+  // Index and array size mismatches
+  a = arange(5);
+  CHECK_THROWS(put_along_axis(a, array({1}), array({0}), 1));
+  CHECK_THROWS(put_along_axis(a, array({1}, {1, 1}), array({0}), 0));
+  CHECK_THROWS(put_along_axis(a, array(1), array(0), -1));
+
+  auto expected = array({0, 0, 2, 3, 4});
+  auto out = put_along_axis(a, array({1}), array({0}), 0);
+  CHECK(array_equal(out, expected).item<bool>());
+
+  // Empty arrays
+  a = reshape(array({}), {1, 0});
+  CHECK_THROWS(put_along_axis(a, array({1}), array({0}), 0));
+
+  auto inds = reshape(astype(array({}), int32), {1, 0});
+  out = take_along_axis(a, inds, 0);
+  eval(out); // Make sure it runs
+  CHECK_EQ(out.shape(), std::vector<int>{1, 0});
+
+  a = array({1, 2, 3, 4}, {2, 2});
+  inds = array({0, 1}, {1, 2});
+  out = put_along_axis(a, inds, array({0}), 0);
+  expected = array({0, 2, 3, 0}, {2, 2});
+  CHECK(array_equal(out, expected).item<bool>());
+
+  inds = array({0, 0, 1, 1}, {2, 2}, int32);
+  auto values = array({2, 3, 4, 5}, {2, 2}, int32);
+  out = put_along_axis(a, inds, values, 0);
+  CHECK(array_equal(out, array({2, 3, 4, 5}, {2, 2})).item<bool>());
+
+  inds = array({0, 1}, {2, 1});
+  out = put_along_axis(a, inds, array({0}), 1);
+  expected = array({0, 2, 3, 0}, {2, 2});
+  CHECK(array_equal(out, expected).item<bool>());
 }
 
 TEST_CASE("test scatter") {
@@ -1919,6 +2241,28 @@ TEST_CASE("test scatter") {
   inds = array({0, 1});
   out = scatter_add(in, inds, updates, 0);
   CHECK(array_equal(out, array({1, 0, 1, 0}, {2, 2})).item<bool>());
+
+  // 1D scatter
+  {
+    auto dst = zeros({2, 4}, int32);
+    auto src = reshape(array({1, 2, 3, 4}), {1, 1, 4});
+    auto idx = array({1});
+    auto expected = reshape(array({0, 0, 0, 0, 1, 2, 3, 4}), {2, 4});
+    auto out = scatter(dst, idx, src, 0);
+    CHECK(array_equal(out, expected).item<bool>());
+  }
+
+  // 1D indices with 2D update
+  {
+    auto dst = zeros({3, 4}, int32);
+    auto indices = {array({1}), array({2})};
+    auto axes = {0, 1};
+    auto updates = reshape(array({1, 2, 3, 4}, int32), {1, 2, 2});
+    auto out = scatter(dst, indices, updates, axes);
+    auto expected =
+        reshape(array({0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 3, 4}), {3, 4});
+    CHECK(array_equal(out, expected).item<bool>());
+  }
 }
 
 TEST_CASE("test is positive infinity") {
@@ -2161,35 +2505,61 @@ TEST_CASE("test pad") {
   CHECK_EQ(pad(x, 1).shape(), std::vector<int>{3, 4, 5});
   CHECK_EQ(pad(x, {0, 1}).shape(), std::vector<int>{2, 3, 4});
   CHECK_EQ(pad(x, {{1, 1}, {1, 2}, {3, 1}}).shape(), std::vector<int>{3, 5, 7});
+
+  x = array({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
+  auto padded_x = pad(x, 1);
+  auto expected = array(
+      {0.0f,
+       0.0f,
+       0.0f,
+       0.0f,
+       0.0f,
+       1.0f,
+       2.0f,
+       0.0f,
+       0.0f,
+       3.0f,
+       4.0f,
+       0.0f,
+       0.0f,
+       0.0f,
+       0.0f,
+       0.0f},
+      {4, 4});
+  CHECK(array_equal(padded_x, expected).item<bool>());
 }
 
 TEST_CASE("test power") {
   CHECK_EQ(power(array(1), array(2)).item<int>(), 1);
-  CHECK_EQ((array(1) ^ 2).item<int>(), 1);
-  CHECK_EQ((1 ^ array(2)).item<int>(), 1);
-  CHECK_EQ((array(-1) ^ 2).item<int>(), 1);
-  CHECK_EQ((array(-1) ^ 3).item<int>(), -1);
+  CHECK_EQ((power(array(-1), array(2))).item<int>(), 1);
+  CHECK_EQ((power(array(-1), array(3))).item<int>(), -1);
 
-  // TODO Throws but exception not caught from calling thread
-  // CHECK_THROWS((x^-1).item<int>());
-
-  CHECK_EQ((array(true) ^ array(false)).item<bool>(), true);
-  CHECK_EQ((array(false) ^ array(false)).item<bool>(), true);
-  CHECK_EQ((array(true) ^ array(true)).item<bool>(), true);
-  CHECK_EQ((array(false) ^ array(true)).item<bool>(), false);
+  CHECK_EQ((power(array(true), array(false))).item<bool>(), true);
+  CHECK_EQ((power(array(false), array(false))).item<bool>(), true);
+  CHECK_EQ((power(array(true), array(true))).item<bool>(), true);
+  CHECK_EQ((power(array(false), array(true))).item<bool>(), false);
 
   auto x = array(2.0f);
-  CHECK_EQ((x ^ 0.5).item<float>(), doctest::Approx(std::pow(2.0f, 0.5f)));
-  CHECK_EQ((x ^ 2.0f).item<float>(), 4.0f);
+  CHECK_EQ(
+      (power(x, array(0.5))).item<float>(),
+      doctest::Approx(std::pow(2.0f, 0.5f)));
+  CHECK_EQ(power(x, array(2.0f)).item<float>(), 4.0f);
 
-  CHECK(std::isnan((array(-1.0f) ^ 0.5).item<float>()));
+  CHECK(std::isnan((power(array(-1.0f), array(0.5))).item<float>()));
 
   auto a = complex64_t{0.5, 0.5};
   auto b = complex64_t{0.5, 0.5};
   auto expected = std::pow(a, b);
-  auto out = (array(a) ^ array(b)).item<complex64_t>();
+  auto out = (power(array(a), array(b))).item<complex64_t>();
   CHECK(abs(out.real() - expected.real()) < 1e-7);
   CHECK(abs(out.imag() - expected.imag()) < 1e-7);
+
+  a = complex64_t{-1.2, 0.1};
+  b = complex64_t{2.2, 0.0};
+  expected = std::pow(a, b);
+  out = (power(array(a), array(b))).item<complex64_t>();
+  CHECK(abs(out.real() - expected.real()) < 1e-6);
+  CHECK(abs(out.imag() - expected.imag()) < 1e-6);
 }
 
 TEST_CASE("test where") {
@@ -2554,14 +2924,13 @@ TEST_CASE("tile") {
 TEST_CASE("tensordot") {
   auto x = reshape(arange(60.), {3, 4, 5});
   auto y = reshape(arange(24.), {4, 3, 2});
-  auto z = tensordot(x, y, {{1, 0}, {0, 1}});
+  auto z = tensordot(x, y, {1, 0}, {0, 1});
   auto expected = array(
       {4400, 4730, 4532, 4874, 4664, 5018, 4796, 5162, 4928, 5306}, {5, 2});
   CHECK(array_equal(z, expected).item<bool>());
   x = reshape(arange(360.), {3, 4, 5, 6});
   y = reshape(arange(360.), {6, 4, 5, 3});
-  CHECK_THROWS_AS(
-      tensordot(x, y, {{2, 1, 3}, {1, 2, 0}}), std::invalid_argument);
+  CHECK_THROWS_AS(tensordot(x, y, {2, 1, 3}, {1, 2, 0}), std::invalid_argument);
   x = reshape(arange(60.), {3, 4, 5});
   y = reshape(arange(120.), {4, 5, 6});
   z = tensordot(x, y, 2);
@@ -2770,6 +3139,192 @@ TEST_CASE("test diag") {
   CHECK(array_equal(out, array({3, 7}, {2})).item<bool>());
 }
 
+TEST_CASE("test issubdtype") {
+  const auto cats = {
+      complexfloating,
+      floating,
+      inexact,
+      signedinteger,
+      unsignedinteger,
+      integer,
+      number,
+      generic};
+  const auto types = {
+      bool_,
+      uint8,
+      uint16,
+      uint32,
+      uint64,
+      int8,
+      int16,
+      int32,
+      int64,
+      float16,
+      float32,
+      bfloat16,
+      complex64};
+  for (const auto& type : types) {
+    CHECK(issubdtype(type, type));
+    CHECK(issubdtype(type, generic));
+    switch (kindof(type)) {
+      case Dtype::Kind::b:
+        CHECK_FALSE(issubdtype(type, complexfloating));
+        CHECK_FALSE(issubdtype(type, floating));
+        CHECK_FALSE(issubdtype(type, inexact));
+        CHECK_FALSE(issubdtype(type, signedinteger));
+        CHECK_FALSE(issubdtype(type, unsignedinteger));
+        CHECK_FALSE(issubdtype(type, integer));
+        CHECK_FALSE(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+      case Dtype::Kind::u:
+        CHECK_FALSE(issubdtype(type, complexfloating));
+        CHECK_FALSE(issubdtype(type, floating));
+        CHECK_FALSE(issubdtype(type, inexact));
+        CHECK_FALSE(issubdtype(type, signedinteger));
+        CHECK(issubdtype(type, unsignedinteger));
+        CHECK(issubdtype(type, integer));
+        CHECK(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+      case Dtype::Kind::i:
+        CHECK_FALSE(issubdtype(type, complexfloating));
+        CHECK_FALSE(issubdtype(type, floating));
+        CHECK_FALSE(issubdtype(type, inexact));
+        CHECK(issubdtype(type, signedinteger));
+        CHECK_FALSE(issubdtype(type, unsignedinteger));
+        CHECK(issubdtype(type, integer));
+        CHECK(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+      case Dtype::Kind::f:
+        CHECK_FALSE(issubdtype(type, complexfloating));
+        CHECK(issubdtype(type, floating));
+        CHECK(issubdtype(type, inexact));
+        CHECK_FALSE(issubdtype(type, signedinteger));
+        CHECK_FALSE(issubdtype(type, unsignedinteger));
+        CHECK_FALSE(issubdtype(type, integer));
+        CHECK(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+      case Dtype::Kind::c:
+        CHECK(issubdtype(type, complexfloating));
+        CHECK_FALSE(issubdtype(type, floating));
+        CHECK(issubdtype(type, inexact));
+        CHECK_FALSE(issubdtype(type, signedinteger));
+        CHECK_FALSE(issubdtype(type, unsignedinteger));
+        CHECK_FALSE(issubdtype(type, integer));
+        CHECK(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+      case Dtype::Kind::V:
+        CHECK_FALSE(issubdtype(type, complexfloating));
+        CHECK(issubdtype(type, floating));
+        CHECK(issubdtype(type, inexact));
+        CHECK_FALSE(issubdtype(type, signedinteger));
+        CHECK_FALSE(issubdtype(type, unsignedinteger));
+        CHECK_FALSE(issubdtype(type, integer));
+        CHECK(issubdtype(type, number));
+        CHECK(issubdtype(type, generic));
+        break;
+    }
+  }
+
+  for (const auto& type : types) {
+    CHECK(issubdtype(type, type));
+    CHECK(issubdtype(type, generic));
+    for (auto type1 : types) {
+      CHECK_EQ(issubdtype(type, type1), type == type1);
+    }
+  }
+
+  for (const auto& cat : cats) {
+    CHECK(issubdtype(cat, cat));
+    switch (cat) {
+      case Dtype::Category::complexfloating:
+        CHECK(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK_FALSE(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::floating:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK(issubdtype(cat, floating));
+        CHECK(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK_FALSE(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::inexact:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK_FALSE(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::signedinteger:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK_FALSE(issubdtype(cat, inexact));
+        CHECK(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::unsignedinteger:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK_FALSE(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK(issubdtype(cat, unsignedinteger));
+        CHECK(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::integer:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK_FALSE(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::number:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK_FALSE(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK_FALSE(issubdtype(cat, integer));
+        CHECK(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+      case Dtype::Category::generic:
+        CHECK_FALSE(issubdtype(cat, complexfloating));
+        CHECK_FALSE(issubdtype(cat, floating));
+        CHECK_FALSE(issubdtype(cat, inexact));
+        CHECK_FALSE(issubdtype(cat, signedinteger));
+        CHECK_FALSE(issubdtype(cat, unsignedinteger));
+        CHECK_FALSE(issubdtype(cat, integer));
+        CHECK_FALSE(issubdtype(cat, number));
+        CHECK(issubdtype(cat, generic));
+        break;
+    }
+  }
+}
+
 TEST_CASE("test atleast_1d") {
   auto x = array(1);
   auto out = atleast_1d(x);
@@ -2858,4 +3413,337 @@ TEST_CASE("test atleast_3d vector") {
   CHECK_EQ(out[1].shape(), std::vector<int>{1, 3, 1});
   CHECK_EQ(out[2].ndim(), 3);
   CHECK_EQ(out[2].shape(), std::vector<int>{3, 1, 1});
+}
+
+TEST_CASE("test topk") {
+  auto x = reshape(arange(10), {2, 5});
+
+  {
+    auto y = topk(x, 1, 1);
+    CHECK(array_equal(y, array({4, 9}, {2, 1})).item<bool>());
+  }
+
+  {
+    auto y = topk(x, 2, 0);
+    CHECK(array_equal(y, x).item<bool>());
+  }
+
+  {
+    auto y = topk(x, 1, 0);
+    CHECK(array_equal(y, array({5, 6, 7, 8, 9}, {1, 5})).item<bool>());
+  }
+}
+
+TEST_CASE("test meshgrid") {
+  // Test default
+  auto x = array({1, 2, 3}, {3});
+  auto in = std::vector<array>{x};
+  auto out = meshgrid(in);
+  CHECK(array_equal(out[0], x).item<bool>());
+
+  // Test different lengths
+  auto y = array({4, 5}, {2});
+  in = std::vector<array>{x, y};
+  out = meshgrid(in);
+  auto expected_zero = array({1, 2, 3, 1, 2, 3}, {2, 3});
+  auto expected_one = array({4, 4, 4, 5, 5, 5}, {2, 3});
+  CHECK(array_equal(out[0], expected_zero).item<bool>());
+  CHECK(array_equal(out[1], expected_one).item<bool>());
+
+  // Test sparse true
+  in = std::vector<array>{x, x};
+  out = meshgrid(in, true);
+  expected_zero = array({1, 2, 3}, {1, 3});
+  expected_one = array({1, 2, 3}, {3, 1});
+  CHECK(array_equal(out[0], expected_zero).item<bool>());
+  CHECK(array_equal(out[1], expected_one).item<bool>());
+}
+
+TEST_CASE("test conv1d") {
+  auto in = astype(
+      array(
+          {0.5488135,
+           0.71518937,
+           0.60276338,
+           0.54488318,
+           0.4236548,
+           0.64589411},
+          {1, 3, 2}),
+      float16);
+
+  int kernel = 3;
+  int stride = 1;
+  int padding = 1;
+
+  {
+    int groups = 1;
+    auto wt = astype(
+        array(
+            {
+
+                0.43758721, 0.891773,   0.96366276, 0.38344152,
+                0.79172504, 0.52889492,
+
+                0.56804456, 0.92559664, 0.07103606, 0.0871293,
+                0.0202184,  0.83261985,
+
+                0.77815675, 0.87001215, 0.97861834, 0.79915856,
+                0.46147936, 0.78052918,
+
+                0.11827443, 0.63992102, 0.14335329, 0.94466892,
+                0.52184832, 0.41466194
+
+            },
+            {4, 3, 2}),
+        float16);
+
+    auto expected = array(
+        {1.56836,
+         0.567383,
+         1.8125,
+         1.29492,
+         2.34375,
+         1.61035,
+         2.77539,
+         1.61328,
+         1.40527,
+         0.933105,
+         1.87402,
+         1.09082},
+        {1, 3, 4});
+
+    auto out = conv1d(in, wt, stride, padding, /* dilation= */ 1, groups);
+    CHECK(allclose(out, expected).item<bool>());
+  }
+
+  {
+    int groups = 2;
+    auto wt = array(
+        {0.43758721,
+         0.891773,
+         0.96366276,
+
+         0.38344152,
+         0.79172504,
+         0.52889492,
+
+         0.56804456,
+         0.92559664,
+         0.07103606,
+
+         0.0871293,
+         0.0202184,
+         0.83261985
+
+        },
+        {4, 3, 1});
+
+    auto expected = array(
+        {1.07007,
+         0.753201,
+         0.700818,
+         0.468176,
+         1.18568,
+         0.91152,
+         0.956607,
+         0.611213,
+         0.641404,
+         0.566401,
+         0.907472,
+         0.0605397},
+        {1, 3, 4});
+
+    auto out = conv1d(in, wt, stride, padding, /* dilation= */ 1, groups);
+    CHECK(allclose(out, expected).item<bool>());
+  }
+}
+
+TEST_CASE("test conv2d") {
+  auto in = array(
+      {0.57429284,
+       -0.21628855,
+       -0.18673691,
+       -0.3793517,
+
+       0.3059678,
+       -0.8137168,
+       0.6168841,
+       -0.26912728},
+      {1, 2, 2, 2});
+
+  std::pair<int, int> kernel{2, 2};
+  std::pair<int, int> stride{1, 1};
+  std::pair<int, int> padding{0, 0};
+
+  {
+    int groups = 1;
+
+    auto wt = array(
+        {0.3190391,   -0.24937038, 1.4621079,   -2.0601406,  -0.3224172,
+         -0.38405436, 1.1337694,   -1.0998913,  -0.1724282,  -0.8778584,
+         0.04221375,  0.58281523,  -1.1006192,  1.1447237,   0.9015907,
+         0.50249434,  0.90085596,  -0.68372786, -0.12289023, -0.93576944,
+         -0.26788807, 0.53035545,  -0.69166076, -0.39675352, -0.6871727,
+         -0.84520566, -0.6712461,  -0.0126646,  -1.1173104,  0.2344157,
+         1.6598022,   0.74204415},
+        {4, 2, 2, 2});
+
+    auto expected =
+        array({1.9549234, -0.98542136, 0.2097499, 0.20991313}, {1, 1, 1, 4});
+    auto out = conv2d(in, wt, stride, padding, /* dilation= */ {1, 1}, groups);
+    CHECK(allclose(out, expected).item<bool>());
+  }
+
+  {
+    int groups = 2;
+    auto wt = array(
+        {0.3190391,
+         -0.24937038,
+
+         1.46210794,
+         -2.06014071,
+
+         -0.3224172,
+         -0.38405435,
+
+         1.13376944,
+         -1.09989127,
+
+         -0.17242821,
+         -0.87785842,
+
+         0.04221375,
+         0.58281521,
+
+         -1.10061918,
+         1.14472371,
+
+         0.90159072,
+         0.50249434},
+        {4, 2, 2, 1});
+
+    auto expected = array(
+        {-0.59372161, -0.44505326, 0.17910982, -1.06507601}, {1, 1, 1, 4});
+
+    auto out = conv2d(in, wt, stride, padding, /* dilation= */ {1, 1}, groups);
+    CHECK(allclose(out, expected).item<bool>());
+  }
+
+  {
+    in = array(
+        {0.57429284,
+         -0.21628855,
+         -0.18673691,
+         -0.3793517,
+
+         0.3059678,
+         -0.8137168,
+         0.6168841,
+         -0.26912728,
+
+         0.57429284,
+         -0.21628855,
+         -0.18673691,
+         -0.3793517,
+
+         0.3059678,
+         -0.8137168,
+         0.6168841,
+         -0.26912728},
+        {2, 2, 2, 2});
+
+    int groups = 2;
+    auto wt = array(
+        {0.3190391,
+         -0.24937038,
+
+         1.46210794,
+         -2.06014071,
+
+         -0.3224172,
+         -0.38405435,
+
+         1.13376944,
+         -1.09989127,
+
+         -0.17242821,
+         -0.87785842,
+
+         0.04221375,
+         0.58281521,
+
+         -1.10061918,
+         1.14472371,
+
+         0.90159072,
+         0.50249434},
+        {4, 2, 2, 1});
+
+    auto expected = array(
+        {-0.59372161, -0.44505326, 0.17910982, -1.06507601}, {1, 1, 1, 4});
+
+    auto out = conv2d(in, wt, stride, padding, /* dilation= */ {1, 1}, groups);
+    CHECK(allclose(out, expected).item<bool>());
+  }
+}
+
+TEST_CASE("test trace") {
+  auto in = eye(3);
+  auto out = trace(in).item<float>();
+  CHECK_EQ(out, 3.0);
+
+  in = array({1, 2, 3, 4, 5, 6, 7, 8, 9}, {3, 3}, int32);
+  auto out2 = trace(in).item<int>();
+  CHECK_EQ(out2, 15);
+
+  in = reshape(arange(8), {2, 2, 2});
+  auto out3 = trace(in, 0, 0, 1);
+  CHECK(array_equal(out3, array({6, 8}, {2})).item<bool>());
+
+  auto out4 = trace(in, 0, 1, 2, float32);
+  CHECK(array_equal(out4, array({3, 11}, {2})).item<bool>());
+}
+
+TEST_CASE("test view") {
+  auto in = array(3);
+  CHECK_THROWS(view(in, int64));
+
+  in = array({1, 2, 3});
+  CHECK_THROWS(view(in, int64));
+
+  in = array({1, 2, 3, 4}, int64);
+  auto out = view(in, int32);
+  CHECK(array_equal(out, array({1, 0, 2, 0, 3, 0, 4, 0})).item<bool>());
+}
+
+TEST_CASE("test roll") {
+  auto x = reshape(arange(10), {2, 5});
+
+  auto y = roll(x, 2);
+  CHECK(array_equal(y, array({8, 9, 0, 1, 2, 3, 4, 5, 6, 7}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, -2);
+  CHECK(array_equal(y, array({2, 3, 4, 5, 6, 7, 8, 9, 0, 1}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, 2, 1);
+  CHECK(array_equal(y, array({3, 4, 0, 1, 2, 8, 9, 5, 6, 7}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, -2, 1);
+  CHECK(array_equal(y, array({2, 3, 4, 0, 1, 7, 8, 9, 5, 6}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, 2, {0, 0, 0});
+  CHECK(array_equal(y, array({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, 1, {1, 1, 1});
+  CHECK(array_equal(y, array({2, 3, 4, 0, 1, 7, 8, 9, 5, 6}, {2, 5}))
+            .item<bool>());
+
+  y = roll(x, {1, 2}, {0, 1});
+  CHECK(array_equal(y, array({8, 9, 5, 6, 7, 3, 4, 0, 1, 2}, {2, 5}))
+            .item<bool>());
 }

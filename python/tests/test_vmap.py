@@ -49,8 +49,9 @@ class TestVmap(mlx_tests.MLXTestCase):
             "sin",
             "sqrt",
             "square",
+            "degrees",
+            "radians",
         ]
-        ops = ["erfinv"]
         for opname in ops:
             with self.subTest(op=opname):
                 op = getattr(mx, opname)
@@ -122,15 +123,12 @@ class TestVmap(mlx_tests.MLXTestCase):
         self.assertTrue(mx.array_equal(out, my_fun(tree)))
 
         with self.assertRaises(ValueError):
-            mx.vmap(my_fun, in_axes={"a": 0, "b": 0}, out_axes=0)(tree)
-
-        with self.assertRaises(ValueError):
             mx.vmap(my_fun, in_axes={"a": 0, "b": ((0, 0), 0)}, out_axes=0)(tree)
 
-        out = mx.vmap(my_fun, in_axes=({"a": 0, "b": 0},), out_axes=0)(tree)
+        out = mx.vmap(my_fun, in_axes={"a": 0, "b": 0}, out_axes=0)(tree)
         self.assertTrue(mx.array_equal(out, my_fun(tree)))
 
-        out = mx.vmap(my_fun, in_axes=({"a": 0, "b": (0, 0)},), out_axes=0)(tree)
+        out = mx.vmap(my_fun, in_axes={"a": 0, "b": (0, 0)}, out_axes=0)(tree)
         self.assertTrue(mx.array_equal(out, my_fun(tree)))
 
         tree = {
@@ -140,7 +138,7 @@ class TestVmap(mlx_tests.MLXTestCase):
                 mx.random.uniform(shape=(4, 2)),
             ),
         }
-        out = mx.vmap(my_fun, in_axes=({"a": 0, "b": (1, 1)},), out_axes=0)(tree)
+        out = mx.vmap(my_fun, in_axes={"a": 0, "b": (1, 1)}, out_axes=0)(tree)
         expected = (tree["a"] + tree["b"][0].T) * tree["b"][1].T
         self.assertTrue(mx.array_equal(out, expected))
 
@@ -253,6 +251,17 @@ class TestVmap(mlx_tests.MLXTestCase):
         expected = mx.array([2, 1])
         self.assertTrue(mx.array_equal(out, expected))
 
+    def test_vmap_mean(self):
+        a = mx.arange(8).reshape(2, 4)
+        out = mx.vmap(mx.mean)(a)
+        expected = mx.mean(a, axis=1)
+        self.assertTrue(mx.allclose(out, expected))
+
+        a = mx.arange(16).reshape(2, 2, 4)
+        out = mx.vmap(mx.vmap(mx.mean))(a)
+        expected = mx.mean(a, axis=2)
+        self.assertTrue(mx.allclose(out, expected))
+
     def test_mismatch_input_sizes(self):
         a = mx.ones((10, 1))
         b = mx.ones((1, 1, 1, 5))
@@ -263,6 +272,195 @@ class TestVmap(mlx_tests.MLXTestCase):
         b = mx.ones((10, 5))
         with self.assertRaises(ValueError):
             out = mx.vmap(lambda x, y: x + y, in_axes=(0, 1))(a, b)
+
+    def test_vmap_matmul(self):
+        a = mx.random.uniform(shape=(2, 3, 4))
+        b = mx.random.uniform(shape=(4, 3))
+
+        # matmul
+        out = mx.vmap(mx.matmul, in_axes=(0, None))(a, b)
+        self.assertTrue(mx.allclose(out, a @ b))
+
+        # addmm
+        c = mx.random.uniform(shape=(3,))
+        out = mx.vmap(mx.addmm, in_axes=(None, 0, None))(c, a, b)
+        self.assertTrue(mx.allclose(out, mx.addmm(c, a, b)))
+
+        b = mx.random.uniform(shape=(4, 2))
+
+        # matmul
+        out = mx.vmap(mx.matmul, in_axes=(1, None), out_axes=(1,))(a, b)
+        expected = mx.moveaxis(mx.moveaxis(a, 1, 0) @ b, 0, 1)
+        self.assertTrue(mx.allclose(out, expected))
+
+        # addmm
+        c = mx.random.uniform(shape=(2,))
+        out = mx.vmap(mx.addmm, in_axes=(None, 1, None))(c, a, b)
+        self.assertTrue(mx.allclose(out, mx.addmm(c, mx.moveaxis(a, 1, 0), b)))
+
+        a = mx.random.uniform(shape=(2, 3, 4))
+        b = mx.random.uniform(shape=(4, 2, 3))
+
+        # matmul
+        out = mx.vmap(mx.matmul, in_axes=(0, 1))(a, b)
+        expected = a @ mx.moveaxis(b, 1, 0)
+        self.assertTrue(mx.allclose(out, expected))
+
+        # addmm
+        c = mx.random.uniform(shape=(3, 3, 2))
+        out = mx.vmap(mx.addmm, in_axes=(2, 0, 1))(c, a, b)
+        expected = mx.addmm(mx.moveaxis(c, 2, 0), a, mx.moveaxis(b, 1, 0))
+        self.assertTrue(mx.allclose(out, expected))
+
+    def test_vmap_svd(self):
+        a = mx.random.uniform(shape=(3, 4, 2))
+
+        cpu_svd = lambda x: mx.linalg.svd(x, stream=mx.cpu)
+
+        # Vmap over the first axis (this is already supported natively by the primitive).
+        Us, Ss, Vts = mx.vmap(cpu_svd, in_axes=(0,))(a)
+        self.assertEqual(Us.shape, (a.shape[0], a.shape[1], a.shape[1]))
+        self.assertEqual(Ss.shape, (a.shape[0], a.shape[2]))
+        self.assertEqual(Vts.shape, (a.shape[0], a.shape[2], a.shape[2]))
+
+        for i in range(a.shape[0]):
+            M = a[i]
+            U, S, Vt = Us[i], Ss[i], Vts[i]
+            self.assertTrue(
+                mx.allclose(U[:, : len(S)] @ mx.diag(S) @ Vt, M, rtol=1e-5, atol=1e-7)
+            )
+
+        # Vmap over the second axis.
+        Us, Ss, Vts = mx.vmap(cpu_svd, in_axes=(1,))(a)
+        self.assertEqual(Us.shape, (a.shape[1], a.shape[0], a.shape[0]))
+        self.assertEqual(Ss.shape, (a.shape[1], a.shape[2]))
+        self.assertEqual(Vts.shape, (a.shape[1], a.shape[2], a.shape[2]))
+
+        for i in range(a.shape[1]):
+            M = a[:, i, :]
+            U, S, Vt = Us[i], Ss[i], Vts[i]
+            self.assertTrue(
+                mx.allclose(U[:, : len(S)] @ mx.diag(S) @ Vt, M, rtol=1e-5, atol=1e-7)
+            )
+
+    def test_vmap_inverse(self):
+        a = mx.random.uniform(shape=(3, 4, 4))
+
+        cpu_inv = lambda x: mx.linalg.inv(x, stream=mx.cpu)
+
+        # Vmap over the first axis (this is already supported natively by the primitive).
+        invs = mx.vmap(cpu_inv, in_axes=(0,))(a)
+
+        for i in range(a.shape[0]):
+            self.assertTrue(
+                mx.allclose(a[i] @ invs[i], mx.eye(a.shape[1]), rtol=0, atol=1e-5)
+            )
+
+        a = mx.random.uniform(shape=(4, 3, 4))
+
+        # Without vmapping, each input matrix is not square.
+        with self.assertRaises(ValueError):
+            mx.eval(cpu_inv(a))
+
+        # Vmap over the second axis.
+        invs = mx.vmap(cpu_inv, in_axes=(1,))(a)
+
+        for i in range(a.shape[1]):
+            self.assertTrue(
+                mx.allclose(a[:, i, :] @ invs[i], mx.eye(a.shape[0]), rtol=0, atol=1e-5)
+            )
+
+    def test_vmap_scatter(self):
+        def scatter(a):
+            a[mx.array(0)] = mx.array(0.0)
+            return a
+
+        a = mx.array([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+        out = mx.vmap(scatter)(a)
+        expected = mx.array([[0.0, 2.0, 3.0], [0.0, 3.0, 4.0]])
+        self.assertTrue(mx.allclose(out, expected))
+
+        out = mx.vmap(scatter, in_axes=(1,), out_axes=1)(a)
+        expected = mx.array([[0.0, 0.0, 0.0], [2.0, 3.0, 4.0]])
+        self.assertTrue(mx.allclose(out, expected))
+
+        def scatter_add(a):
+            return a.at[mx.array(0)].add(mx.array(1.0))
+
+        a = mx.array([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+        out = mx.vmap(scatter_add)(a)
+        expected = mx.array([[2.0, 2.0, 3.0], [3.0, 3.0, 4.0]])
+        self.assertTrue(mx.allclose(out, expected))
+
+        out = mx.vmap(scatter_add, in_axes=(1,), out_axes=1)(a)
+        expected = mx.array([[2.0, 3.0, 4.0], [2.0, 3.0, 4.0]])
+        self.assertTrue(mx.allclose(out, expected))
+
+        # Multiple indices
+        def scatter(a):
+            a[mx.array([0, 1]), mx.array([0, 1])] = mx.array((1.0, 1.0))
+            return a
+
+        a = mx.zeros((3, 3, 3))
+
+        expected = mx.repeat(scatter(mx.zeros((3, 3)))[None], 3, axis=0)
+        out = mx.vmap(scatter, in_axes=(0,), out_axes=0)(a)
+        self.assertTrue(mx.allclose(out, expected))
+
+        expected = mx.zeros((3, 3, 3))
+        expected[0, :, 0] = 1
+        expected[1, :, 1] = 1
+        out = mx.vmap(scatter, in_axes=(1,), out_axes=1)(a)
+        self.assertTrue(mx.allclose(out, expected))
+
+        expected = mx.zeros((3, 3, 3))
+        expected[0, 0, :] = 1
+        expected[1, 1, :] = 1
+        out = mx.vmap(scatter, in_axes=(2,), out_axes=2)(a)
+        self.assertTrue(mx.allclose(out, expected))
+
+        # vmap over src and indices
+        def scatter(a, idx):
+            a[idx] = mx.array(1.0)
+            return a
+
+        a = mx.zeros((3, 4))
+        idx = mx.array([0, 1, 2])
+        out = mx.vmap(scatter, in_axes=(0, 0), out_axes=0)(a, idx)
+        self.assertTrue(mx.allclose(out, mx.eye(n=3, m=4)))
+
+        # vmap over only indices
+        out = mx.vmap(scatter, in_axes=(None, 0), out_axes=0)(a, idx)
+        expected = mx.zeros((3, 3, 4))
+        expected[0, 0] = 1
+        expected[1, 1] = 1
+        expected[2, 2] = 1
+        self.assertTrue(mx.allclose(out, expected))
+
+        # vmap over src, indices, updates
+        def scatter(a, idx, updates):
+            a[idx] = updates
+            return a
+
+        a = mx.zeros((3, 4))
+        idx = mx.array([0, 1, 2])
+        updates = mx.array([1, 2, 3])
+        out = mx.vmap(scatter, in_axes=(0, 0, 0), out_axes=0)(a, idx, updates)
+        expected = mx.diag(mx.array([1, 2, 3]), k=-1)[1:]
+        self.assertTrue(mx.allclose(out, expected))
+
+        # vmap over only updates
+        def scatter(a, idx, updates):
+            a[idx] = updates
+            return a
+
+        a = mx.zeros((3, 4))
+        idx = mx.array([0])
+        updates = mx.array([1, 2, 3])
+        out = mx.vmap(scatter, in_axes=(None, None, 0), out_axes=0)(a, idx, updates)
+        expected = mx.zeros((3, 3, 4))
+        expected[:, 0] = mx.array([1, 2, 3])[:, None]
+        self.assertTrue(mx.allclose(out, expected))
 
 
 if __name__ == "__main__":

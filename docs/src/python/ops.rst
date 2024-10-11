@@ -5,13 +5,14 @@ Operations
 
 .. currentmodule:: mlx.core
 
-.. autosummary:: 
+.. autosummary::
   :toctree: _autosummary
 
    abs
    add
+   addmm
    all
-   allclose 
+   allclose
    any
    arange
    arccos
@@ -19,48 +20,75 @@ Operations
    arcsin
    arcsinh
    arctan
+   arctan2
    arctanh
    argmax
    argmin
    argpartition
    argsort
    array_equal
+   as_strided
    atleast_1d
    atleast_2d
    atleast_3d
+   bitwise_and
+   bitwise_or
+   bitwise_xor
+   block_masked_mm
    broadcast_to
    ceil
    clip
    concatenate
+   conj
+   conjugate
    convolve
    conv1d
    conv2d
+   conv3d
+   conv_transpose1d
+   conv_transpose2d
+   conv_transpose3d
    conv_general
    cos
    cosh
+   cummax
+   cummin
+   cumprod
+   cumsum
+   degrees
    dequantize
    diag
    diagonal
    divide
    divmod
+   einsum
+   einsum_path
    equal
    erf
    erfinv
    exp
+   expm1
    expand_dims
    eye
    flatten
    floor
    floor_divide
    full
+   gather_mm
+   gather_qmm
    greater
    greater_equal
+   hadamard_transform
    identity
    inner
-   isnan
-   isposinf
-   isneginf
+   isfinite
+   isclose
    isinf
+   isnan
+   isneginf
+   isposinf
+   issubdtype
+   left_shift
    less
    less_equal
    linspace
@@ -78,22 +106,31 @@ Operations
    max
    maximum
    mean
+   meshgrid
    min
    minimum
    moveaxis
    multiply
+   nan_to_num
    negative
+   not_equal
    ones
    ones_like
    outer
    partition
    pad
+   power
    prod
+   put_along_axis
    quantize
    quantized_matmul
+   radians
    reciprocal
+   remainder
    repeat
    reshape
+   right_shift
+   roll
    round
    rsqrt
    save
@@ -112,6 +149,7 @@ Operations
    square
    squeeze
    stack
+   std
    stop_gradient
    subtract
    sum
@@ -121,11 +159,15 @@ Operations
    tan
    tanh
    tensordot
+   tile
+   topk
+   trace
    transpose
    tri
    tril
    triu
    var
+   view
    where
    zeros
    zeros_like

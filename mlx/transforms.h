@@ -2,14 +2,18 @@
 
 #pragma once
 
+#include <optional>
+
 #include "mlx/array.h"
 
 namespace mlx::core {
 
-void eval(const std::vector<array>& outputs);
+void async_eval(std::vector<array> outputs);
 
-template <typename... Arrays>
-void eval(Arrays... outputs) {
+void eval(std::vector<array> outputs);
+
+template <typename... Arrays, typename = enable_for_arrays_t<Arrays...>>
+void eval(Arrays&&... outputs) {
   eval(std::vector<array>{std::forward<Arrays>(outputs)...});
 }
 
@@ -177,8 +181,31 @@ std::function<std::vector<array>(const std::vector<array>&)> vmap(
     const std::vector<int>& out_axes = {});
 
 /**
- * Return the results of calling fun with args but if their vjp is computed it
- * will be computed by fun_vjp.
+ * Redefine the transformations of `fun` according to the provided functions.
+ *
+ * Namely when calling the vjp of `fun` then `fun_vjp` will be called,
+ * `fun_jvp` for the jvp and `fun_vmap` for vmap.
+ *
+ * If any transformation is not provided, then a default one is created by
+ * calling `vjp`, `jvp` and `vmap` on the function directly.
+ */
+std::function<std::vector<array>(const std::vector<array>&)> custom_function(
+    std::function<std::vector<array>(const std::vector<array>&)> fun,
+    std::optional<std::function<std::vector<array>(
+        const std::vector<array>&,
+        const std::vector<array>&,
+        const std::vector<array>&)>> fun_vjp = std::nullopt,
+    std::optional<std::function<std::vector<array>(
+        const std::vector<array>&,
+        const std::vector<array>&,
+        const std::vector<int>&)>> fun_jvp = std::nullopt,
+    std::optional<std::function<std::pair<std::vector<array>, std::vector<int>>(
+        const std::vector<array>&,
+        const std::vector<int>&)>> fun_vmap = std::nullopt);
+
+/**
+ * Return a function that behaves exactly like `fun` but if the vjp of the
+ * results is computed `fun_vjp` will be used instead of `vjp(fun, ...)` .
  */
 std::function<std::vector<array>(const std::vector<array>&)> custom_vjp(
     std::function<std::vector<array>(const std::vector<array>&)> fun,

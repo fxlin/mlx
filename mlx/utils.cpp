@@ -58,11 +58,11 @@ inline void PrintFormatter::print(std::ostream& os, complex64_t val) {
 PrintFormatter global_formatter;
 
 Dtype result_type(const std::vector<array>& arrays) {
-  std::vector<Dtype> dtypes(1, bool_);
+  Dtype t = bool_;
   for (auto& arr : arrays) {
-    dtypes.push_back(promote_types(dtypes.back(), arr.dtype()));
+    t = promote_types(t, arr.dtype());
   }
-  return dtypes.back();
+  return t;
 }
 
 std::vector<int> broadcast_shapes(
@@ -264,9 +264,7 @@ std::ostream& operator<<(std::ostream& os, const Dtype::Kind& k) {
 }
 
 std::ostream& operator<<(std::ostream& os, array a) {
-  if (!a.is_evaled()) {
-    a.eval();
-  }
+  a.eval();
   switch (a.dtype()) {
     case bool_:
       print_array<bool>(os, a);
@@ -321,6 +319,15 @@ std::ostream& operator<<(std::ostream& os, const std::vector<int>& v) {
 }
 
 std::ostream& operator<<(std::ostream& os, const std::vector<size_t>& v) {
+  os << "(";
+  for (int i = 0; i < v.size(); ++i) {
+    os << v[i] << ((i == v.size() - 1) ? "" : ",");
+  }
+  os << ")";
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const std::vector<int64_t>& v) {
   os << "(";
   for (int i = 0; i < v.size(); ++i) {
     os << v[i] << ((i == v.size() - 1) ? "" : ",");

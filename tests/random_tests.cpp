@@ -248,11 +248,9 @@ TEST_CASE("test random uniform") {
     CHECK_EQ(x.size(), 1);
     CHECK_EQ(x.dtype(), float32);
 
-    if (is_available(float16)) {
-      x = random::uniform({}, float16);
-      CHECK_EQ(x.size(), 1);
-      CHECK_EQ(x.dtype(), float16);
-    }
+    x = random::uniform({}, float16);
+    CHECK_EQ(x.size(), 1);
+    CHECK_EQ(x.dtype(), float16);
 
     x = random::uniform({0});
     CHECK(array_equal(x, array({})).item<bool>());
@@ -422,6 +420,63 @@ TEST_CASE("test random normal") {
   }
 }
 
+TEST_CASE("test random multivariate_normal") {
+  {
+    auto mean = zeros({3});
+    auto cov = eye(3);
+    auto x = random::multivariate_normal(mean, cov, {1000}, float32);
+    CHECK_EQ(x.shape(), std::vector<int>({1000, 3}));
+    CHECK_EQ(x.dtype(), float32);
+  }
+
+  // Limit case
+  {
+    auto mean = array({0, 0});
+    auto cov = array({1., -1, -.1, 1.});
+    cov = reshape(cov, {2, 2});
+    auto x = random::multivariate_normal(mean, cov, {1}, float32);
+    CHECK_EQ(x.shape(), std::vector<int>({1, 2}));
+    CHECK_EQ(x.dtype(), float32);
+  }
+
+  // Check wrong shapes
+  {
+    auto mean = zeros({3, 1});
+    auto cov = eye(3);
+    CHECK_THROWS_AS(
+        random::multivariate_normal(
+            mean,
+            cov,
+            {
+                1000,
+            },
+            float32),
+        std::invalid_argument);
+  }
+  {
+    auto mean = zeros({3});
+    auto cov = zeros({1, 2, 3, 3});
+    auto x = random::multivariate_normal(mean, cov, {1000, 2}, float32);
+    CHECK_EQ(x.shape(), std::vector<int>({1000, 2, 3}));
+  }
+  {
+    auto mean = zeros({3});
+    auto cov = eye(4);
+    CHECK_THROWS_AS(
+        random::multivariate_normal(mean, cov, {1000, 3}, float32),
+        std::invalid_argument);
+  }
+
+  // Check wrong type
+  {
+    auto mean = zeros({3});
+    auto cov = eye(3);
+    CHECK_THROWS_AS(
+        random::multivariate_normal(mean, cov, {1000, 3}, float16),
+        std::invalid_argument);
+  }
+}
+
 TEST_CASE("test random randint") {
   CHECK_THROWS_AS(
       random::randint(array(3), array(5), {1}, float32), std::invalid_argument);
@@ -467,11 +522,9 @@ TEST_CASE("test random bernoulli") {
   CHECK_EQ(x.dtype(), bool_);
 
   // Bernoulli parameter can have floating point type
-  if (is_available(float16)) {
-    x = random::bernoulli(array(0.5, float16));
-    CHECK_EQ(x.size(), 1);
-    CHECK_EQ(x.dtype(), bool_);
-  }
+  x = random::bernoulli(array(0.5, float16));
+  CHECK_EQ(x.size(), 1);
+  CHECK_EQ(x.dtype(), bool_);
 
   CHECK_THROWS(random::bernoulli(array(1, int32)));
 
@@ -513,11 +566,9 @@ TEST_CASE("Test truncated normal") {
   CHECK_EQ(x.size(), 1);
   CHECK_EQ(x.dtype(), float32);
 
-  if (is_available(float16)) {
-    x = random::truncated_normal(array(-2.0), array(2.0), {}, float16);
-    CHECK_EQ(x.size(), 1);
-    CHECK_EQ(x.dtype(), float16);
-  }
+  x = random::truncated_normal(array(-2.0), array(2.0), {}, float16);
+  CHECK_EQ(x.size(), 1);
+  CHECK_EQ(x.dtype(), float16);
 
   // Requested shape
   x = random::truncated_normal(array(-2.0), array(2.0), {3, 4});
@@ -588,4 +639,75 @@ TEST_CASE("test categorical") {
   CHECK_EQ(categorical(logits, -1, 7).shape(), std::vector<int>{5, 4, 7});
   CHECK_EQ(categorical(logits, -2, 7).shape(), std::vector<int>{5, 3, 7});
   CHECK_EQ(categorical(logits, -3, 7).shape(), std::vector<int>{4, 3, 7});
+}
+
+TEST_CASE("test laplace") {
+  // Test shapes, types, and sizes
+  {
+    auto x = random::laplace({});
+    CHECK_EQ(x.size(), 1);
+    CHECK_EQ(x.dtype(), float32);
+
+    // Non float type throws
+    CHECK_THROWS_AS(random::laplace({}, int32), std::invalid_argument);
+
+    // Check wrong key type or shape
+    auto key = array({0, 0});
+    CHECK_THROWS_AS(random::laplace({}, key), std::invalid_argument);
+    key = array({0, 0}, {1, 2});
+    CHECK_THROWS_AS(random::laplace({}, key), std::invalid_argument);
+    key = array({0u, 0u, 0u}, {3, 1});
+    CHECK_THROWS_AS(random::laplace({}, key), std::invalid_argument);
+    key = array({0u, 0u}, {2, 1});
+    CHECK_THROWS_AS(random::laplace({}, key), std::invalid_argument);
+  }
+
+  {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    auto key = random::key(128291);
+    auto out = random::laplace({1000000}, key);
+    float sample_mean = mean(out).item<float>();
+    float sample_variance = var(out).item<float>();
+
+    CHECK(all(less(abs(out), array(inf))).item<bool>());
+    CHECK(abs(sample_mean) < 0.1);
+
+    // Chebyshev's inequality.
+    for (int k = 1; k <= 5; ++k) {
+      float prob_above =
+          mean(greater_equal(out, array(k * std::sqrt(sample_variance))))
+              .item<float>();
+      float bound = 1 / std::pow(k, 2);
+      CHECK(prob_above < bound);
+    }
+
+    // Expected variance for Laplace distribution is 2*scale^2.
+    float expected_variance = 2.0;
+    CHECK(std::abs(sample_variance - expected_variance) < 0.01);
+
+    // Expected kurtosis of Laplace distribution is 3.
+    array fourth_pows = power(out - sample_mean, {4});
+    float sample_kurtosis =
+        mean(fourth_pows).item<float>() / std::pow(sample_variance, 2) - 3;
+    float expected_kurtosis = 3.0;
+    CHECK(std::abs(sample_kurtosis - expected_kurtosis) < 0.1);
+  }
+
+  {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    auto key = random::key(128291);
+    auto out = random::laplace({10000}, float16, key);
+    CHECK_EQ(out.dtype(), float16);
+    CHECK(all(less(abs(out), array(inf))).item<bool>());
+    CHECK(abs(float(mean(out).item<float16_t>())) < 0.1);
+  }
+
+  {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    auto key = random::key(128291);
+    auto out = random::laplace({10000}, bfloat16, key);
+    CHECK_EQ(out.dtype(), bfloat16);
+    CHECK(all(less(abs(out), array(inf))).item<bool>());
+    CHECK(abs(float(mean(out).item<bfloat16_t>())) < 0.1);
+  }
 }

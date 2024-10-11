@@ -1,29 +1,31 @@
-// Copyright © 2023 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-void init_array(py::module_&);
-void init_device(py::module_&);
-void init_stream(py::module_&);
-void init_metal(py::module_&);
-void init_ops(py::module_&);
-void init_transforms(py::module_&);
-void init_random(py::module_&);
-void init_fft(py::module_&);
-void init_linalg(py::module_&);
-void init_constants(py::module_&);
-void init_extensions(py::module_&);
-void init_utils(py::module_&);
+void init_array(nb::module_&);
+void init_device(nb::module_&);
+void init_stream(nb::module_&);
+void init_metal(nb::module_&);
+void init_ops(nb::module_&);
+void init_transforms(nb::module_&);
+void init_random(nb::module_&);
+void init_fft(nb::module_&);
+void init_linalg(nb::module_&);
+void init_constants(nb::module_&);
+void init_fast(nb::module_&);
+void init_distributed(nb::module_&);
 
-PYBIND11_MODULE(core, m) {
+NB_MODULE(core, m) {
   m.doc() = "mlx: A framework for machine learning on Apple silicon.";
 
-  auto reprlib_fix = py::module_::import("mlx._reprlib_fix");
+  auto reprlib_fix = nb::module_::import_("mlx._reprlib_fix");
+  nb::module_::import_("mlx._os_warning");
+  nb::set_leak_warnings(false);
 
   init_device(m);
   init_stream(m);
@@ -35,8 +37,8 @@ PYBIND11_MODULE(core, m) {
   init_fft(m);
   init_linalg(m);
   init_constants(m);
-  init_extensions(m);
-  init_utils(m);
+  init_fast(m);
+  init_distributed(m);
 
   m.attr("__version__") = TOSTRING(_VERSION_);
 }

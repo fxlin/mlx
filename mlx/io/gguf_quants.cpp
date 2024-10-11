@@ -2,13 +2,15 @@
 
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 
-#include <mlx/io/gguf.h>
+#include "mlx/io/gguf.h"
 
 namespace mlx::core {
 
 void unpack_32_4(uint8_t* data, int8_t* dst) {
-  for (int64_t j = 0; j < 16; ++j) {
+  std::fill_n(dst, 16, 0);
+  for (int j = 0; j < 16; ++j) {
     uint8_t x = (data[j + 2] & 0x0F); // j+2 to skip scale bytes.
     if (j % 2 != 0) {
       x <<= 4;
@@ -16,7 +18,7 @@ void unpack_32_4(uint8_t* data, int8_t* dst) {
     dst[j / 2] += x;
   }
   // Last 16 weights are in the higher bits
-  for (int64_t j = 0; j < 16; ++j) {
+  for (int j = 0; j < 16; ++j) {
     uint8_t x = (data[j + 2] >> 4);
     if (j % 2 != 0) {
       x <<= 4;
@@ -105,7 +107,8 @@ void gguf_load_quantized(
     weights_per_byte = 1;
   }
 
-  std::string name = std::string(tensor.name, tensor.namelen);
+  std::string name(tensor.name, tensor.namelen);
+
   std::vector<int> shape = get_shape(tensor);
   const uint64_t weights_per_block = 32;
   if (shape[shape.size() - 1] % weights_per_block != 0) {
@@ -117,17 +120,21 @@ void gguf_load_quantized(
 
   std::vector<int> weights_shape = shape;
   weights_shape.back() /= (weights_per_byte * 4);
+  auto w_nbytes = uint32.size() *
+      std::accumulate(weights_shape.begin(),
+                      weights_shape.end(),
+                      1,
+                      std::multiplies<size_t>());
 
-  array weights(std::move(weights_shape), uint32, nullptr, {});
-  weights.set_data(allocator::malloc(weights.nbytes()));
+  array weights(allocator::malloc(w_nbytes), std::move(weights_shape), uint32);
 
   // For scales and bias
   shape[shape.size() - 1] = shape[shape.size() - 1] / weights_per_block;
-  array scales(shape, float16, nullptr, {});
-  array biases(std::move(shape), float16, nullptr, {});
-  scales.set_data(allocator::malloc(scales.nbytes()));
-  biases.set_data(allocator::malloc(biases.nbytes()));
+  auto sb_nbytes = float16.size() *
+      std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
 
+  array scales(allocator::malloc(sb_nbytes), shape, float16);
+  array biases(allocator::malloc(sb_nbytes), std::move(shape), float16);
   if (tensor.type == GGUF_TYPE_Q4_0) {
     extract_q4_0_data(tensor, weights, scales, biases);
   } else if (tensor.type == GGUF_TYPE_Q4_1) {
@@ -136,9 +143,9 @@ void gguf_load_quantized(
     extract_q8_0_data(tensor, weights, scales, biases);
   }
 
-  a.insert({name, weights});
+  a.emplace(name, std::move(weights));
 
-  auto check_insert = [](auto inserted) {
+  auto check_insert = [](const auto& inserted) {
     if (!inserted.second) {
       std::ostringstream msg;
       msg << "[load_gguf] Duplicate parameter name " << inserted.first->second
@@ -147,11 +154,11 @@ void gguf_load_quantized(
     }
   };
 
-  const std::string weight_suffix = ".weight";
+  constexpr std::string_view weight_suffix = ".weight";
   const std::string name_prefix =
       name.substr(0, name.length() - weight_suffix.length());
-  check_insert(a.insert({name_prefix + ".scales", scales}));
-  check_insert(a.insert({name_prefix + ".biases", biases}));
+  check_insert(a.emplace(name_prefix + ".scales", std::move(scales)));
+  check_insert(a.emplace(name_prefix + ".biases", std::move(biases)));
 }
 
 } // namespace mlx::core

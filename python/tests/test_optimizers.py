@@ -10,7 +10,7 @@ import mlx.nn as nn
 import mlx.optimizers as opt
 import mlx.utils
 import mlx_tests
-from mlx.utils import tree_flatten, tree_map
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
 
 def get_all_optimizers():
@@ -206,20 +206,22 @@ class TestOptimizers(mlx_tests.MLXTestCase):
 
     def test_adafactor(self):
         x = mx.zeros((5, 5))
-        grad = mx.ones_like(x)
+        params = {"x": x}
+        grad = {"x": mx.ones_like(x)}
         optimizer = opt.Adafactor()
         for _ in range(2):
-            xp = optimizer.apply_gradients(grad, x)
-            self.assertEqual(xp.dtype, x.dtype)
-            self.assertEqual(xp.shape, x.shape)
+            xp = optimizer.apply_gradients(grad, params)
+            self.assertEqual(xp["x"].dtype, x.dtype)
+            self.assertEqual(xp["x"].shape, x.shape)
 
         x = mx.zeros((5, 5), mx.float16)
-        grad = mx.ones_like(x)
+        params = {"x": x}
+        grad = {"x": mx.ones_like(x)}
         optimizer = opt.Adafactor()
         for _ in range(2):
-            xp = optimizer.apply_gradients(grad, x)
-            self.assertEqual(xp.dtype, x.dtype)
-            self.assertEqual(xp.shape, x.shape)
+            xp = optimizer.apply_gradients(grad, params)
+            self.assertEqual(xp["x"].dtype, x.dtype)
+            self.assertEqual(xp["x"].shape, x.shape)
         self.assertEqual(optimizer.state["step"], 2)
 
     def test_compiled_optimizer(self):
@@ -299,16 +301,16 @@ class TestOptimizers(mlx_tests.MLXTestCase):
 class TestSchedulers(unittest.TestCase):
     def test_decay_lr(self):
         for optim_class in optimizers_dict.values():
-            lr_schedule = opt.step_decay(1e-1, 0.9, 1000)
+            lr_schedule = opt.step_decay(1e-1, 0.9, 1)
             optimizer = optim_class(learning_rate=lr_schedule)
 
             params = {"w": mx.ones((5, 5))}
             grads = tree_map(lambda x: mx.ones_like(x), params)
 
             for it in range(10):
+                optimizer.apply_gradients(grads, params)
                 expected_lr = 0.1 * (0.9**it)
                 self.assertAlmostEqual(optimizer.learning_rate, expected_lr, delta=1e-7)
-                return optimizer.apply_gradients(grads, params)
 
     def test_step_decay(self):
         lr_schedule = opt.step_decay(1e-1, 0.9, 1000)
@@ -327,6 +329,13 @@ class TestSchedulers(unittest.TestCase):
         lr = lr_schedule(4)
         expected_lr = 0.1 * 0.5 * (1.0 + math.cos(math.pi * 4 / 10))
         self.assertAlmostEqual(lr, expected_lr, delta=1e-7)
+
+        lr_schedule = opt.cosine_decay(0.1, 10, 0.05)
+        lr = lr_schedule(9)
+        expected_end_lr = 0.05
+        self.assertGreater(lr, expected_end_lr)
+        lr = lr_schedule(20)
+        self.assertEqual(lr, expected_end_lr)
 
     def test_schedule_joiner(self):
         boundaries = [2, 3, 4]
@@ -370,6 +379,72 @@ class TestSchedulers(unittest.TestCase):
         for step in range(5):
             update()
             self.assertAlmostEqual(lr_schedule(step), optimizer.learning_rate.item())
+
+    def test_clip_grad_norm(self):
+        # Test with small gradients that do not require clipping
+        small_grads = {
+            "first": [mx.array([0.1, 0.2]), mx.array([0.1])],
+            "second": mx.array([0.3]),
+        }
+        max_norm = 10.0  # A large max_norm that shouldn't trigger clipping
+        clipped_grads, total_norm = opt.clip_grad_norm(small_grads, max_norm)
+        self.assertTrue(
+            tree_equal(lambda x, y: mx.array_equal(x, y), small_grads, clipped_grads),
+            "Gradients should not be modified when clipping is not necessary.",
+        )
+
+        # Test with large gradients that require clipping
+        large_grads = {
+            "first": [mx.array([10, 20]), mx.array([10])],
+            "second": mx.array([30]),
+        }
+        max_norm = 1.0  # A small max_norm that should trigger clipping
+        clipped_grads, total_norm = opt.clip_grad_norm(large_grads, max_norm)
+        # Correctly extract only the gradient values for norm calculation
+        clipped_values = [value for _, value in tree_flatten(clipped_grads)]
+        norm_of_clipped = mx.sqrt(
+            sum(mx.square(g).sum() for g in clipped_values)
+        ).item()
+        self.assertAlmostEqual(
+            norm_of_clipped,
+            max_norm,
+            places=6,
+            msg="Clipped gradients norm should be close to the specified max_norm.",
+        )
+
+        # Ensures that the scaling was done correctly
+        scale = max_norm / total_norm
+        expected_grads = tree_map(lambda g: g * scale, large_grads)
+        self.assertTrue(
+            tree_equal(
+                lambda x, y: mx.allclose(x, y, atol=1e-6), expected_grads, clipped_grads
+            ),
+            "Gradients were not scaled correctly during clipping.",
+        )
+
+    def test_init_from_state(self):
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.l1 = nn.Linear(2, 2)
+                self.drop = nn.Dropout(p=0.5)
+                self.l2 = nn.Linear(2, 2)
+                self.vals = [nn.Linear(2, 2), nn.ReLU(), nn.ReLU()]
+
+        model = Model()
+        optimizer = opt.Adam(learning_rate=3e-4)
+        optimizer.init(model.trainable_parameters())
+
+        # Flatten the state for serialization
+        state = tree_flatten(optimizer.state)
+
+        # Make a new optimizer and load the state
+        optimizer = opt.Adam(learning_rate=3e-4)
+        optimizer.state = tree_unflatten(state)
+
+        # This should work without any errors
+        grads = model.trainable_parameters()
+        optimizer.update(model, grads)
 
 
 if __name__ == "__main__":
