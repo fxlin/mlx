@@ -23,6 +23,7 @@ template <> struct AccT<bfloat16_t> {
   typedef float acc_t;
 };
 
+// xzl: qmv -quantized mul X vec?
 template <typename T, const int BM, const int BN, const int group_size, const int bits>
 [[kernel]] void qmv(
     const device uint32_t* w [[buffer(0)]],
@@ -531,7 +532,8 @@ template <typename T, const int BM, const int BK, const int BN, const int group_
   }
 }
 
-
+// xzl: itype: item type? w: weights, quant, packed in uint32_t
+//    from below, item types are all FP...
 #define instantiate_qmv(name, itype, group_size, bits) \
   template [[host_name("qmv_" #name "_gs_" #group_size "_b_" #bits)]] \
   [[kernel]] void qmv<itype, 32, 32, group_size, bits>( \

@@ -1,5 +1,7 @@
 // Copyright © 2023 Apple Inc.
 
+// xzl: softare emulated bf16/???  seem to convert to float(fp16) before all ops...
+
 #pragma once
 
 #include <algorithm>
@@ -15,7 +17,7 @@ namespace {
 union float_bits_bf16 {
   float f;
   uint32_t u;
-};
+};      // xzl: 32bit??  for float32 conversion only?
 } // namespace
 
 struct _MLX_BFloat16 {
@@ -81,7 +83,7 @@ struct _MLX_BFloat16 {
     return static_cast<ctype>(lhs) __op__ static_cast<ctype>(rhs);     \
   }
 
-// Operators
+// Operators        xzl: all convert to float then do the op???
 #define bfloat_binop(_op_, _operator_)                                       \
   bfloat_binop_base(                                                         \
       _op_, _operator_, _MLX_BFloat16, _MLX_BFloat16, _MLX_BFloat16, float); \
@@ -120,7 +122,7 @@ bfloat_compop(!=, operator!=);
 
 #undef bfloat_compop
 
-// Negative
+// Negative     xzl: still convert to float
 inline _MLX_BFloat16 operator-(_MLX_BFloat16 lhs) {
   return -static_cast<float>(lhs);
 }

@@ -18,7 +18,7 @@
 namespace mlx::core {
 
 ///////////////////////////////////////////////////////////////////////////////
-// MPS Matmul fallback
+// MPS Matmul fallback      xzl:why "fallback??" meaning if the gpu cannot run it?
 ///////////////////////////////////////////////////////////////////////////////
 
 namespace {
@@ -422,6 +422,7 @@ void steel_matmul(
   return;
 }
 
+// xzl: the main matmul entry? dispatch based on various conditions....
 void Matmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 2);
   if (!is_floating_point(out.dtype())) {

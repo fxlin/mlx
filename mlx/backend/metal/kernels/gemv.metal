@@ -13,6 +13,10 @@ using namespace metal;
 /// Matrix vector multiplication
 ///////////////////////////////////////////////////////////////////////////////
 
+// xzl: easier to unerstand... than ggml mul (mv, or mm) 
+//  simd api only used for sum, not mul
+//  not using simdmatrix matmul, probably slower than ggml??
+
 #define MLX_MTL_CONST static constant constexpr const
 
 MLX_MTL_CONST int SIMD_SIZE = 32;
@@ -38,7 +42,8 @@ struct GEMVKernel {
   // 3. At the end, each thread has accumulated results over all blocks across the rows
   //      These are then summed up across the threadgroup
   // 4. Each threadgroup writes its accumulated BN * TN outputs
-  //
+  //  xzl: lowest level is vec-vec mac (each size of TN)
+  // 
   // Edge case handling:
   // - The threadgroup with the largest tid will have blocks that exceed the matrix
   //   * The blocks that start outside the matrix are never read (thread results remain zero)
@@ -113,7 +118,7 @@ struct GEMVKernel {
       // Load for all rows
       #pragma clang loop unroll(full)
       for(int tn = 0; tn < TN; tn++) {
-        v_coeff[tn] = in_vec_block[tn];
+        v_coeff[tn] = in_vec_block[tn]; // xzl: load per thread row buffer
       }
 
       // Per thread work loop
@@ -124,7 +129,7 @@ struct GEMVKernel {
         if(bn + TN <= in_vec_size) {
           #pragma clang loop unroll(full)
           for(int tn = 0; tn < TN; tn++) {
-            inter[tn] = mat[tm * in_vec_size + bn + tn];
+            inter[tn] = mat[tm * in_vec_size + bn + tn];  // xzl: mat is device mem, load to thread mem
           }
 
         } else { // Edgecase
@@ -137,7 +142,7 @@ struct GEMVKernel {
 
         // Accumulate results
         for(int tn = 0; tn < TN; tn++) {
-          result[tm] += inter[tn] * v_coeff[tn];
+          result[tm] += inter[tn] * v_coeff[tn];  // xzl: vec-vec mac
         }
 
       }

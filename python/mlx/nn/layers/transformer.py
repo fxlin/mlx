@@ -64,6 +64,7 @@ class MultiHeadAttention(Module):
                 f"number of heads ({dims} % {num_heads}) != 0"
             )
 
+        # xzl: so Q/K/V input dims can even differ....       default to be dim
         query_input_dims = query_input_dims or dims
         key_input_dims = key_input_dims or dims
         value_input_dims = value_input_dims or key_input_dims
@@ -76,24 +77,27 @@ class MultiHeadAttention(Module):
         self.value_proj = Linear(value_input_dims, value_dims, bias=bias)
         self.out_proj = Linear(value_dims, value_output_dims, bias=bias)
 
+    # xzl: here queries and keys can be off diff lens. (e.g. for cross attn)
     def __call__(self, queries, keys, values, mask=None):
+        # xzl: evaluate projections... not splitting heads
         queries = self.query_proj(queries)
         keys = self.key_proj(keys)
         values = self.value_proj(values)
 
         num_heads = self.num_heads
-        B, L, D = queries.shape
-        _, S, _ = keys.shape
+        B, L, D = queries.shape     #xzl: b-batch, l-length, D-feature dim? 
+        _, S, _ = keys.shape        #xzl: S-? seq len different from Q's len (like for cross attn?)
+        # xzl: reshape into per head? then transpose for matmul?
         queries = queries.reshape(B, L, num_heads, -1).transpose(0, 2, 1, 3)
         keys = keys.reshape(B, S, num_heads, -1).transpose(0, 2, 3, 1)
         values = values.reshape(B, S, num_heads, -1).transpose(0, 2, 1, 3)
 
-        # Dimensions are [batch x num heads x sequence x hidden dim]
-        scale = math.sqrt(1 / queries.shape[-1])
-        scores = (queries * scale) @ keys
+        # Dimensions are [batch x num heads x sequence x hidden dim]        xzl: cf transpose above. also note 4D matmul
+        scale = math.sqrt(1 / queries.shape[-1])        # xzl: last dim of q.. is per head hidden dim
+        scores = (queries * scale) @ keys               # xzl: attn scores (i.e. attn weights
         if mask is not None:
-            scores = scores + mask.astype(scores.dtype)
-        scores = mx.softmax(scores, axis=-1)
+            scores = scores + mask.astype(scores.dtype) # xzl: apply mask on attn scors.. then softmax
+        scores = mx.softmax(scores, axis=-1)            # xzl: last dim, i.e attn score rowise??
         values_hat = (scores @ values).transpose(0, 2, 1, 3).reshape(B, L, -1)
 
         return self.out_proj(values_hat)
