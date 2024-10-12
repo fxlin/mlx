@@ -112,7 +112,7 @@ def bench_shape(B, M, N, K, np_dtype, transpose="nn"):
 
     a_np = np.random.normal(0.0, 1.0 / math.sqrt(M + K), shape_a).astype(np_dtype)
     b_np = np.random.normal(0.0, 1.0 / math.sqrt(N + K), shape_b).astype(np_dtype)
-
+    
     a_mx = mx.array(a_np)
     b_mx = mx.array(b_np)
 
@@ -162,6 +162,9 @@ def get_gflop_count(B, M, N, K):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run gemm benchmarks")
+
+    # mx.set_default_device(mx.cpu)   # xzl. default device seems "gpu". set "cpu" here will be very slow. 
+    # there seems no way to specify device for individual tensors. 
 
     dtypes = ("float32", "float16")
     transposes = ("nn", "nt", "tn")

@@ -195,6 +195,7 @@ def bench_with_out_len(ax, out_vec_len, in_vector_lens, dtype, transpose):
     ax.legend()
 
 
+breakpoint()
 for transpose in (False, True):
     for dtype in ("float32", "float16"):
         fig, axs = plt.subplots(
