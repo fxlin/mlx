@@ -74,7 +74,7 @@ inline void matmul_cblas_general(
 }
 
 inline void matmul_cblas(const array& a_pre, const array& b_pre, array& out) {
-  if (out.dtype() != float32) {
+  if (out.dtype(1) != float32) {
     throw std::runtime_error(
         "[matmul_cblas] on CPU currently only supports float32");
   }
