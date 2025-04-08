@@ -22,13 +22,8 @@ N_warmup = 5
 N_iter_bench = 50
 N_iter_func = 20
 
-# xzl: orig
-# out_vec_sizes = [128, 512, 2048, 4096]
-# in_vec_sizes = [128, 512, 2048, 4096]
-
-out_vec_sizes = [128, 512]
-in_vec_sizes = [128, 512]
-
+out_vec_sizes = [128, 512, 2048, 4096]
+in_vec_sizes = [128, 512, 2048, 4096]
 
 benchmark_vector_lens = []
 benchmark_vector_lens += [(i + 1) * 4096 for i in range(8)][::2]
@@ -138,7 +133,6 @@ def get_gbyte_size(in_vec_len, out_vec_len, np_dtype):
     return float(N_iter_bench * N_iter_func * n_elem * item_size) / float(1024**3)
 
 
-# xzl: for a given in_vec_len, test the performance of gemv with different out_vec_len, plot 
 def bench_with_in_len(ax, in_vec_len, out_vector_lens, dtype, transpose):
     np_dtype = getattr(np, dtype)
     mlx_gb_s = []
@@ -201,22 +195,18 @@ def bench_with_out_len(ax, out_vec_len, in_vector_lens, dtype, transpose):
     ax.legend()
 
 
-# for transpose in (False, True):
-for transpose in [False]:
+for transpose in (False, True):
     for dtype in ("float32", "float16"):
-    # for dtype in ["float16"]:
         fig, axs = plt.subplots(
             len(in_vec_sizes), 2, figsize=(8.5, 11), layout="constrained"
         )
 
         for i, in_vec_len in enumerate(in_vec_sizes):
-            print(f"Running in_vec_len for {in_vec_len} transpose {transpose} dtype {dtype}")
             bench_with_in_len(
                 axs[i][0], in_vec_len, benchmark_vector_lens, dtype, transpose
             )
 
         for i, out_vec_len in enumerate(out_vec_sizes):
-            print(f"Running out_vec_len for {out_vec_len} transpose {transpose} dtype {dtype}")
             bench_with_out_len(
                 axs[i][1], out_vec_len, benchmark_vector_lens, dtype, transpose
             )

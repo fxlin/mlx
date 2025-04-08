@@ -14,8 +14,7 @@ device_name = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string
 device_name = device_name.decode("utf-8").strip("\n")
 
 N_warmup = 8
-# N_iter_bench = 80  # orig
-N_iter_bench = 10  # fxl, faster
+N_iter_bench = 80
 N_iter_func = 5
 
 
@@ -164,24 +163,16 @@ def get_gflop_count(B, M, N, K):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run gemm benchmarks")
 
-    # dtypes = ("float32", "float16")    
-    # transposes = ("nn", "nt", "tn")
-    # shapes = (
-    #     (16, 234, 768, 3072),
-    #     (1, 64, 64, 25344),
-    #     (16, 1024, 1024, 1024),
-    #     (1, 1024, 1024, 2048),
-    #     (4, 1024, 1024, 4096),
-    #     (4, 1024, 4096, 1024),
-    #     (1, 4096, 4096, 4096),
-    # )
-
-    # for quick test fp16
-    # dtypes = ("float32",)
-    dtypes = ("float16",)
-    transposes = ("nn",)
+    dtypes = ("float32", "float16")
+    transposes = ("nn", "nt", "tn")
     shapes = (
+        (16, 234, 768, 3072),
+        (1, 64, 64, 25344),
         (16, 1024, 1024, 1024),
+        (1, 1024, 1024, 2048),
+        (4, 1024, 1024, 4096),
+        (4, 1024, 4096, 1024),
+        (1, 4096, 4096, 4096),
     )
 
     for dtype in dtypes:

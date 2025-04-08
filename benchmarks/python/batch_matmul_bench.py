@@ -1,14 +1,20 @@
 # Copyright © 2023 Apple Inc.
 
+# FL: only for testing functions, not for benchmarking (too short)
+
 import argparse
 
 import mlx.core as mx
 from time_utils import time_fn
 
-B = 8
-T = 1024
-D = 512
+# B = 8
+# T = 1024
+# D = 512
 
+# xzl
+B = 4
+T = 2048
+D = 2048
 
 def time_batch_matmul():
     mx.random.seed(3)
