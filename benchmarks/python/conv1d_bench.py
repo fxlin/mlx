@@ -72,6 +72,7 @@ def bench_shape(N, iH, C, wH, O, strides, padding, np_dtype, groups):
     time_torch = bench(f_pt, a_pt, b_pt)
     time_mlx = bench(f_mx, a_mx, b_mx)
 
+    # xzl: these are for checking correctness
     out_mx = mx.conv1d(a_mx, b_mx, stride=strides, padding=padding, groups=groups)
     out_pt = torch.conv1d(
         a_pt.to("cpu"), b_pt.to("cpu"), stride=strides, padding=padding, groups=groups

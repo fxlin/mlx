@@ -22,8 +22,18 @@ def time_batch_matmul():
     b = mx.random.uniform(shape=(D, D))
     c = mx.random.uniform(shape=(B, T, D))
     mx.eval(a, b, c)
-
     time_fn(mx.matmul, a, b)
+
+    a16 = mx.random.uniform(shape=(B, T, D), dtype=mx.float16)
+    b16 = mx.random.uniform(shape=(D, D), dtype=mx.float16)
+
+    a16bf = mx.random.uniform(shape=(B, T, D), dtype=mx.bfloat16)
+    b16bf = mx.random.uniform(shape=(D, D), dtype=mx.bfloat16)
+
+    mx.eval(a16, b16, a16bf, b16bf)
+    
+    time_fn(mx.matmul, a16, b16)
+    time_fn(mx.matmul, a16bf, b16bf)
 
     def batch_vjp_first():
         return mx.vjp(mx.matmul, [a, b], [c])[1][0]

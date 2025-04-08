@@ -1,4 +1,5 @@
 // Copyright © 2023-2024 Apple Inc.
+// xzl: 3/6/25 worth reading. not using simd_sum, but simd_shuffle_down
 
 #include <metal_simdgroup>
 #include <metal_stdlib>
@@ -17,19 +18,41 @@ using namespace metal;
 
 #define MLX_MTL_CONST static constant constexpr const
 
+// xzl: 3/6/25. clearer document, and more regular partition (as compared to ggml....
+// 3/18/25 understood 4/5. feels really like a generic template, allowing to explore many knobs
+/*       
+  diff vs. ggml's gemv. 
+| Feature                          | mlx                                              | ggml                                      |
+|----------------------------------|------------------------------------------------|------------------------------------------|
+| Supported Operations             | Only supports `gemv`                           | Supports `gemm` (implemented via `gemv`) |
+| Extensibility to `gemm`          | Possible by treating `src1` rows as `dim3`    | Already supports `gemm`                 |
+| SIMD Reduction                   | Uses `simd_shuffle_down` within `simdgroup`   | Uses `simd_sum` within `simdgroup`      |
+(otherwise pretty much similar? 
+
+    ex values: cf instantiate_gemv_blocks()
+    BM=4, BN=1, SM=1, SN=32, TM=1, TN=4
+    BM=4, BN=1, SM=1, SN=32, TM=4, TN=4
+    BM=8, BN=1, SM=1, SN=32, TM=4, TN=4
+    TM=4, TN=4 means each thread processes only 4x4 weights -- very small?? the rely on simdgroup reduction to sum up the results...
+
+    expansion path: instantiate_gemv_blocks() -> instantiate_gemv() -> instantiate_gemv_helper() -> gemv() -> 
+          -> GEMVKernel()
+*/
 template <
     typename T,
     const int BM, /* Threadgroup rows (in simdgroups) */
     const int BN, /* Threadgroup cols (in simdgroups) */
-    const int SM, /* Simdgroup rows (in threads) */
+    const int SM, /* Simdgroup rows (in threads) */     // xzl: simdgrup has a shape as well? not just 32 threads?
     const int SN, /* Simdgroup cols (in threads) */
     const int TM, /* Thread rows (in elements) */
     const int TN, /* Thread cols (in elements) */
     const bool kDoAxpby> /* Do out = alpha * out + beta * bias */
 struct GEMVKernel {
-  MLX_MTL_CONST int threadsM = BM * SM;
+  // xzl: a thrgrp's size, e.g 4x32 threads
+  MLX_MTL_CONST int threadsM = BM * SM;   
   MLX_MTL_CONST int threadsN = BN * SN;
 
+  // xzl: workload size ... a "matrix block" of src0 (weights)
   MLX_MTL_CONST int blockM = threadsM * TM;
   MLX_MTL_CONST int blockN = threadsN * TN;
 
@@ -39,13 +62,16 @@ struct GEMVKernel {
       SN == 8 || SN == 16 || SN == 32,
       "gemv block must have a width of 8, 16, or 32");
 
+  // xzl: very clear writing below!
   // - The matrix of size (M = out_vec_size, K = in_vec_size) is divided up
   //   into blocks of (blockM, blockN) divided among threadgroups
   // - Every thread works on a block of (TM, TN)
   // - We assume each threadgroup has (threadsN, threadsM, 1) threads
+  // fxl: the grid size seem to be (in_vec_size/threadsM, thredsN) in threadgrps 
+  //  (that is, each threadgrop works on threadsM adjacent rows in the input)
   //
   // 1. A thread loads TN elements each from mat along TM rows
-  //    and the corresponding scalar from the vector
+  //    and the corresponding scalar from the vector (fxl: in a striding, repeated manner)
   // 2. The thread then multiplies and adds to accumulate its local result for
   //    the block
   // 3. At the end, each thread has accumulated results over all blocks across
@@ -62,8 +88,10 @@ struct GEMVKernel {
   MLX_MTL_CONST short tgp_mem_size = BN > 1 ? BN*(blockM + TM) : 0;
   MLX_MTL_CONST bool needs_tgp_reduction = BN > 1;
 
+  // xzl: safe/unsafe -- with/without bound check
   static METAL_FUNC void
   load_unsafe(const device T* src, thread T dst[TN], const int src_offset = 0) {
+    // fxl: load one partial row? (e.g. 4 elements
     MLX_MTL_PRAGMA_UNROLL
     for (int tn = 0; tn < TN; tn++) {
       dst[tn] = src[src_offset + tn];
@@ -107,7 +135,7 @@ struct GEMVKernel {
     // Appease compiler
     (void)lid;
 
-    // Thread local accumulation results
+    // Thread local accumulation results   fxl: TM/TN=4 these are very small 
     thread T result[TM] = {0};
     thread T inter[TN];
     thread T v_coeff[TN];
@@ -134,7 +162,7 @@ struct GEMVKernel {
     out_row = out_row + TM <= out_vec_size ? out_row : out_vec_size - TM;
 
     // Advance matrix
-    mat += out_row * matrix_ld;
+    mat += out_row * matrix_ld;   // fxl: mat points to src0?
 
     constexpr const uniform<int> loop_stride = make_uniform(blockN);
     const uniform<int> in_size = make_uniform(in_vec_size);
@@ -143,6 +171,7 @@ struct GEMVKernel {
     const uniform<int> leftover = in_size - last_iter;
 
     // Loop over in_vec in blocks of blockN
+    // fxl: a thread in fact works on multiple "blocks". with stride of blockN
     for (int i = 0; i < n_iter; ++i) {
       load_unsafe(in_vec, v_coeff, bn);
 
@@ -150,7 +179,7 @@ struct GEMVKernel {
       int mat_offset = 0;
       MLX_MTL_PRAGMA_UNROLL
       for (int tm = 0; tm < TM; tm++) {
-        // Load for the row
+        // Load for the row (fxl: from "mat" to "inter"
         load_unsafe(mat, inter, mat_offset + bn);
 
         // Accumulate results
@@ -162,7 +191,7 @@ struct GEMVKernel {
         mat_offset += matrix_ld;
       }
 
-      bn += blockN;
+    bn += blockN; // fxl: the thread strides to next "block"
     }
 
     if (leftover > 0) {
@@ -182,16 +211,21 @@ struct GEMVKernel {
       }
     }
 
-    // Simdgroup accumulations
+    // Simdgroup accumulations    xzl: acc within each simdgrp.. 
+    //  xzl:  note SIMD parallelization over SN (but log(SN) iterations, so that's good?); not SM (a thread still uses loop). 
+    //     how does this compae to ggml using simd_sum??
     MLX_MTL_PRAGMA_UNROLL
     for (int tm = 0; tm < TM; tm++) {
+      // xzl: SN: simdgrup rows (in threads)
       MLX_MTL_PRAGMA_UNROLL
       for (ushort sn = (SN / 2); sn >= 1; sn >>= 1) {
+        // xzl: kinda like bufferfly sum?
         result[tm] += simd_shuffle_down(result[tm], sn);
       }
     }
 
-    // Threadgroup accumulation results
+    // Threadgroup accumulation results   
+    //  fxl: use loop to accumulate. often BN=1 (!needs_tgp_reduction) so the whole thing gets skipped. can be expensive b/c/ of threadgrp barrier     
     if (needs_tgp_reduction) {
       threadgroup T* tgp_results = tgp_memory + sgN * (blockM + TM) + bm;
       if (thrN == 0) {
@@ -415,7 +449,7 @@ struct GEMVTKernel {
 ///////////////////////////////////////////////////////////////////////////////
 /// Matrix vector multiplication
 ///////////////////////////////////////////////////////////////////////////////
-
+// xzl: will create GEMVKernel... and invoke
 template <
     typename T,
     const int BM, /* Threadgroup rows (in simdgroups) */
@@ -515,6 +549,8 @@ template <
       uint simd_lid [[thread_index_in_simdgroup]]);
 
 // clang-format off
+// fxl: the naming seems a bit messy. guess it should be (name, itype, bm_x_bn, sm_x_sn, tm, tn)
+//    then in expansion, forcing bn=1 and sm=1
 #define instantiate_gemv(name, itype, bm, bn, tm, tn)              \
   instantiate_gemv_helper(name, itype, bm, 1, 1, bn, tm, tn, 0, 0) \
   instantiate_gemv_helper(name, itype, bm, 1, 1, bn, tm, tn, 0, 1) \
